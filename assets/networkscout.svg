@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- networkScout icon: a shield with a radar sweep, in the "Midnight Ink" palette -->
+  <rect width="64" height="64" rx="14" fill="#191926"/>
+  <path d="M32 8 L51 15 V30 C51 42.5 43 50.5 32 56 C21 50.5 13 42.5 13 30 V15 Z"
+        fill="#20202f" stroke="#7dd3fc" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="32" cy="31" r="11" fill="none" stroke="#2c2c42" stroke-width="2"/>
+  <circle cx="32" cy="31" r="6" fill="none" stroke="#86efac" stroke-width="2.2"/>
+  <path d="M32 31 L41.5 24.5" stroke="#86efac" stroke-width="2.6" stroke-linecap="round"/>
+  <circle cx="32" cy="31" r="2.4" fill="#86efac"/>
+  <circle cx="24.5" cy="25" r="1.6" fill="#fde68a"/>
+</svg>

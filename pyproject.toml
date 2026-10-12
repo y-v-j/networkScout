@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "networkscout"
+version = "1.0.0"
+description = "Read-only security and privacy self-check for Linux (system, DNS leaks, man-in-the-middle, open ports), with a fixer, port/firewall control and a live desktop dashboard."
+readme = "README.md"
+requires-python = ">=3.6"
+license = {text = "MIT"}
+authors = [{name = "Yogesh"}]
+keywords = ["security", "firewall", "dns-leak", "mitm", "ports", "linux"]
+classifiers = [
+    "Environment :: Console",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: System :: Networking :: Firewalls",
+]
+
+[project.scripts]
+networkscout = "networkscout:main"
+
+[project.gui-scripts]
+networkscout-app = "networkscout_gui:main"
+
+[tool.setuptools]
+py-modules = ["networkscout", "networkscout_gui"]

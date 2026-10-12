@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=networkScout
+GenericName=Network Security Monitor
+Comment=Firewall, open ports, DNS and live network events, with switches
+# "~", not "$HOME": systemd's autostart generator escapes "$", so sh would never expand it
+Exec=sh -c "exec ~/.local/bin/networkscout-app"
+Icon=networkscout
+Terminal=false
+Categories=System;Security;Monitor;
+Keywords=firewall;ports;dns;vpn;leak;security;network;
+StartupWMClass=networkScout
