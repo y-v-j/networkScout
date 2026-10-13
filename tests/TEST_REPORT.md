@@ -1,12 +1,12 @@
 # networkScout test report
 
-**Date:** 2026-10-12 · **Version tested:** the code in this folder on that date
+**Date:** 2026-10-13 (unit and scenario tests on every system, after adding the Devices tab and `networkscout devices`) · the accuracy, installer and security results are from 2026-10-12
 
 ## Summary
 
 | What | Result |
 |---|---|
-| Unit and scenario tests (core 79, command line 13, app 27) | **119 / 119 pass** on the desktop host and in all 7 distribution containers, as a normal user and as root (skips listed below) |
+| Unit and scenario tests (core 87, command line 14, app 30) | **131 / 131 pass** in all 7 distribution containers as a normal user and as root, plus core and command line on the desktop host and the core on Python 3.6 (skips listed below) |
 | Accuracy against the system's own tools | **18 / 18 match** |
 | Installer (install, launchers, fallback Python, autostart, uninstall) | **13 / 13** on Debian, Arch, openSUSE and Alpine |
 | Full check and every command, 8 systems | **0 tracebacks** |
@@ -18,17 +18,17 @@
 
 | System | Package manager / init | Python | Check and commands | core | cli | app |
 |---|---|---|---|---|---|---|
-| Bazzite 44 (Fedora Atomic) desktop | rpm-ostree / systemd | 3.14 | pass, plus real changes | 79 ✓ | 13 ✓ | 27 ✓ |
-| Debian 12 | apt / none | 3.11 | pass | 79 ✓ | 13 ✓ | 27 ✓ |
-| Ubuntu 24.04 | apt / none | 3.12 | pass | 79 ✓ | 13 ✓ | 27 ✓ |
-| Fedora 44 (non-atomic) | dnf / none | 3.14 | pass | 79 ✓ | 13 ✓ | 27 ✓ |
-| Arch Linux | pacman / none | 3.14 | pass | 79 ✓ | 13 ✓ | 27 ✓ |
-| Gentoo | portage / OpenRC tools | 3.14 | pass | 79 ✓ | 13 ✓ | no Tk |
-| Alpine 3.24 | apk, musl, BusyBox, no `ss` | 3.14 | pass | 79 ✓ | 13 ✓ | 27 ✓ |
-| openSUSE Tumbleweed | zypper / none | 3.13 | pass | 79 ✓ | 13 ✓ | 27 ✓ |
-| python:3.6-slim | apt / none | 3.6 | pass | 79 ✓ | – | – |
+| Bazzite 44 (Fedora Atomic) desktop | rpm-ostree / systemd | 3.14 | pass, plus real changes | 87 ✓ | 14 ✓ | in containers |
+| Debian 12 | apt / none | 3.11 | pass | 87 ✓ | 14 ✓ | 30 ✓ |
+| Ubuntu 24.04 | apt / none | 3.12 | pass | 87 ✓ | 14 ✓ | 30 ✓ |
+| Fedora 44 (non-atomic) | dnf / none | 3.14 | pass | 87 ✓ | 14 ✓ | 30 ✓ |
+| Arch Linux | pacman / none | 3.14 | pass | 87 ✓ | 14 ✓ | 30 ✓ |
+| Gentoo | portage / OpenRC tools | 3.14 | pass | 87 ✓ | 14 ✓ | no Tk |
+| Alpine 3.24 | apk, musl, BusyBox, no `ss` | 3.14 | pass | 87 ✓ | 14 ✓ | 30 ✓ |
+| openSUSE Tumbleweed | zypper / none | 3.13 | pass | 87 ✓ | 14 ✓ | 30 ✓ |
+| python:3.6-slim | apt / none | 3.6 | pass | 87 ✓ | – | – |
 
-Containers ran the app tests under Xvfb. The app was also shown on a real desktop from inside the Debian and Fedora containers (`tests/distro_containers.sh app`).
+Containers ran the app tests under Xvfb (on 2026-10-13 the app tests were not run on the desktop itself, only in the containers). The app was also shown on a real desktop from inside the Debian and Fedora containers (`tests/distro_containers.sh app`).
 
 **Expected skips:**
 
@@ -57,7 +57,12 @@ Containers ran the app tests under Xvfb. The app was also shown on a real deskto
   - system states: firewall turned off, router impersonation, new certificates;
   - a real port opened and closed during the test;
   - window layouts, filters, dialogs, background actions and drawing speed;
-  - `--demo` mode runs no programs and writes no files (checked in a separate process).
+  - `--demo` mode runs no programs and writes no files (checked in a separate process), including the Devices tab.
+- **Devices:**
+  - the maker from the IEEE list, private (random) MACs, the device kind;
+  - only live neighbour entries are listed; NetBIOS name replies; names you give (stored with mode 600, can be forgotten);
+  - the subnet sweep never leaves your own subnet; the app scans once after start and then on request;
+  - a named device that reconnects is reported as "Back on your network" instead of a new device.
 - **Portability:**
   - missing `ss`, `ip`, `journalctl` (log files instead), `busctl`, firewalld or ufw;
   - ufw rules unreadable without root;
@@ -76,6 +81,7 @@ Containers ran the app tests under Xvfb. The app was also shown on a real deskto
 | The app used 8–9 % CPU | Owners from the cgroup instead of scanning `/proc/*/fd`, redraws throttled, text fitting cached: about 1.7 % |
 | Tests assumed systemd's `journalctl`, a non-root user and Fedora's CA bundle path | Tests made independent of those (found by the Debian, root and openSUSE runs) |
 | `tests/distro_containers.sh app` left the app running after Ctrl+C | The app's process is ended when the script ends |
+| The command-line tests could write a device name into the real `~/.config` | The tests use a temporary config folder too |
 
 ## Security review
 

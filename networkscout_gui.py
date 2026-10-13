@@ -75,8 +75,10 @@ ICONS = {
     "download": "\uf019", "mobile": "\uf10b", "terminal": "\uf120", "print": "\uf02f", "exchange": "\uf0ec",
     "user": "\uf007", "server": "\uf233", "ban": "\uf05e", "plus": "\uf067", "file": "\uf15c",
     "sitemap": "\uf0e8", "secret": "\uf21b", "laptop": "\uf109", "sync": "\uf021", "game": "\uf11b",
-    "share": "\uf064", "caret": "\uf0d7",
+    "share": "\uf064", "caret": "\uf0d7", "tv": "\uf26c", "desktop": "\uf108", "question": "\uf128",
 }
+KIND_ICON = {"router": "sitemap", "this": "laptop", "phone": "mobile", "tv": "tv", "printer": "print",
+             "computer": "desktop", "unknown": "question"}
 APP_ICON = {"transmission": "download", "qbittorrent": "download", "deluge": "download", "kdeconnect": "mobile",
             "syncthing": "sync", "steam": "game", "localsend": "share", "ssh": "terminal", "samba": "server",
             "mdns": "sitemap", "printing": "print"}
@@ -315,6 +317,9 @@ class Monitor(threading.Thread):
         self.seen_peers = {}
         self.conn_budget = collections.defaultdict(float)
         self.journal = None
+        self.scan_req = threading.Event()
+        self.dev_names = {}               # mac -> (name, source), asked once per session
+        self.last_scan = 0.0
 
     # -- helpers --------------------------------------------------------------
     def emit(self, level, cat, icon, text, notify=False):
@@ -332,6 +337,11 @@ class Monitor(threading.Thread):
             return dict(self.state)
 
     def refresh_now(self):
+        self.wake.set()
+
+    def request_scan(self):
+        """Devices tab: wake every address on the subnet, then list the devices again."""
+        self.scan_req.set()
         self.wake.set()
 
     # -- tasks ----------------------------------------------------------------
@@ -469,7 +479,29 @@ class Monitor(threading.Thread):
         if dev == old["dev"]:
             for ip, mac in sorted(devices - old["devices"]):
                 if not any(ip == o[0] for o in old["devices"]):
-                    self.emit("info", "net", "laptop", "New device on your network: %s (%s)" % (ip, mac))
+                    label = ns.load_device_labels().get(mac, {}).get("name")
+                    if label:
+                        self.emit("info", "net", "laptop", "Back on your network: %s (%s)" % (label, ip))
+                    else:
+                        maker = ns.mac_vendor(mac)
+                        self.emit("info", "net", "laptop", "New device on your network: %s (%s%s)"
+                                  % (ip, mac, ", " + maker if maker else ""))
+
+    def t_devices(self, first):
+        scan = self.scan_req.is_set() or (not first and not self.last_scan)    # one scan soon after start
+        self.scan_req.clear()
+        if scan:
+            self.set(devices_busy=True)
+        res = ns.lan_devices(scan=scan, names=True, name_cache=self.dev_names)
+        self.dev_names.update(res.get("names", {}))
+        if scan:
+            self.last_scan = time.time()
+        self.set(devices={"list": res["devices"], "iface": res["iface"], "gateway": res["gateway"],
+                          "scanned": self.last_scan}, devices_busy=False)
+        if scan and self.last_scan and first is False and getattr(self, "_scan_reported", 0) != self.last_scan:
+            self._scan_reported = self.last_scan
+            self.emit("you", "you", "sitemap", "Scanned your network: %d device%s" % (
+                len(res["devices"]), "" if len(res["devices"]) == 1 else "s"))
 
     def t_wifi(self, first):
         w = wifi_info()
@@ -675,6 +707,7 @@ class Monitor(threading.Thread):
         threading.Thread(target=self.follow_journal, daemon=True).start()
         tasks = [("firewall", 3, self.t_firewall), ("sockets", 4, self.t_sockets), ("network", 4, self.t_network),
                  ("apps", 4, self.t_apps), ("dns", 10, self.t_dns), ("wifi", 15, self.t_wifi),
+                 ("devices", 30, self.t_devices),
                  ("installed", 120, self.t_installed), ("certs", 60, self.t_certs), ("public", 300, self.t_public)]
         last = collections.defaultdict(float)
         first = True
@@ -683,6 +716,8 @@ class Monitor(threading.Thread):
             self.wake.clear()
             now = time.time()
             for name, every, fn in tasks:
+                if forced and name == "devices" and not self.scan_req.is_set() and now - last[name] < 10:
+                    continue
                 if forced and name in ("public", "installed"):
                     if now - last[name] < 20:
                         continue
@@ -764,6 +799,24 @@ DEMO_EVENTS = [
     (45, "info", "conn", "exchange", "steam -> 203.0.113.120:27017"),
 ]
 
+# Invented devices (documentation addresses and MACs)
+DEMO_DEVICES = [
+    {"ip": "10.0.0.1", "mac": "00:00:5e:00:53:01", "vendor": "Example Networks", "name": "Router", "source": "guess",
+     "state": "REACHABLE", "router": True, "self": False, "random_mac": False, "kind": "router", "named": False},
+    {"ip": "10.0.0.23", "mac": "00:00:5e:00:53:23", "vendor": "Example Computers", "name": "my-laptop (this computer)",
+     "source": "self", "state": "SELF", "router": False, "self": True, "random_mac": False, "kind": "this", "named": False},
+    {"ip": "10.0.0.31", "mac": "00:00:5e:00:53:31", "vendor": "Example TV Co", "name": "Living room TV", "source": "you",
+     "state": "REACHABLE", "router": False, "self": False, "random_mac": False, "kind": "tv", "named": True},
+    {"ip": "10.0.0.42", "mac": "00:00:5e:00:53:42", "vendor": "Example Phones", "name": "Pixel-8", "source": "mdns",
+     "state": "STALE", "router": False, "self": False, "random_mac": False, "kind": "phone", "named": False},
+    {"ip": "10.0.0.55", "mac": "00:00:5e:00:53:55", "vendor": "Example Printers", "name": "office-printer",
+     "source": "mdns", "state": "REACHABLE", "router": False, "self": False, "random_mac": False, "kind": "printer",
+     "named": False},
+    {"ip": "10.0.0.67", "mac": "02:00:5e:00:53:67", "vendor": "private address", "name": "Unknown device",
+     "source": "guess", "state": "STALE", "router": False, "self": False, "random_mac": True, "kind": "unknown",
+     "named": False},
+]
+
 DEMO_HEALTH = {
     "counts": {"RISK": 0, "WARN": 2, "INFO": 12, "OK": 21, "SKIP": 0},
     "findings": [
@@ -784,6 +837,21 @@ class DemoMonitor(Monitor):
     def __init__(self):
         super().__init__(online=False)
         self.state = demo_state()
+        self.state["devices"] = {"list": [dict(d) for d in DEMO_DEVICES], "iface": "wlan0", "gateway": "10.0.0.1",
+                                 "scanned": time.time() - 600}
+
+    def request_scan(self):
+        dv = dict(self.get()["devices"], scanned=time.time())
+        self.set(devices=dv)
+        self.emit("you", "you", "sitemap", "Scanned your network: %d devices" % len(dv["list"]))
+
+    def name_device(self, mac, name):
+        dv = self.get()["devices"]
+        lst = [dict(d) for d in dv["list"]]
+        for d in lst:
+            if d["mac"] == mac:
+                d.update(name=name or d["vendor"], named=bool(name), source="you" if name else "guess")
+        self.set(devices=dict(dv, list=lst))
 
     def run(self):
         now = time.time()
@@ -952,7 +1020,7 @@ class NetworkScoutApp:
     # -- config -------------------------------------------------------------
     def load_config(self):
         cfg = {"filters": {"alert": True, "net": True, "conn": False, "you": True}, "notify": True,
-               "auto_check": True}
+               "auto_check": True, "events_view": "events"}
         if self.demo:
             return cfg
         try:
@@ -1477,6 +1545,11 @@ class NetworkScoutApp:
         if not (top <= e.y <= bottom and x1 - 20 <= e.x <= x2 + 20):
             return
         delta = -1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1
+        if self.cfg.get("events_view") == "devices":
+            shown = len((self.monitor.get().get("devices") or {}).get("list") or [])
+            self.dev_scroll = max(0, min(getattr(self, "dev_scroll", 0) + delta * 2, max(0, shown - self.event_rows + 2)))
+            self.dirty = True
+            return
         shown = len(self.filtered_events())
         self.scroll = max(0, min(self.scroll + delta * 2, max(0, shown - self.event_rows)))
         self.dirty = True
@@ -1634,8 +1707,11 @@ class NetworkScoutApp:
         if self.two_col:     # let the event list fill the right column down to the left column's bottom
             fixed = self.f_title.metrics("linespace") + 8 + 20 + self.lh + 12 + self.lh + 2 + 10 + self.GAP
             self.event_rows = max(EVENT_ROWS, int((left_bottom - y - fixed) // (self.lh + 3)))
+        devices_view = self.cfg.get("events_view") == "devices"
+        n_dev = len((st.get("devices") or {}).get("list") or [])
         y = self.card(y, "LIVE EVENTS", "bolt", COLOR_WARNING, lambda yy, l, r: self.body_events(st, yy, l, r),
-                      right="%d" % len(self.filtered_events()), right_color=COLOR_DIM)
+                      right=("%d device%s" % (n_dev, "" if n_dev == 1 else "s")) if devices_view
+                      else "%d" % len(self.filtered_events()), right_color=COLOR_DIM)
         if self.two_col:
             y = max(y, left_bottom)
         foot = ("demo: invented data, nothing on this computer is read or changed" if self.demo else
@@ -1812,7 +1888,8 @@ class NetworkScoutApp:
                       dns.get("current") or ", ".join(dns.get("servers", [])[:2]),
                       COLOR_SUCCESS if dns.get("encrypted") else COLOR_WARNING))
         lines.append(("exchange", "%d connections out, %d in" % (st.get("conn_count", 0), st.get("inbound_count", 0)),
-                      "%d devices seen on your network" % net.get("devices", 0), COLOR_FG))
+                      "%d devices seen on your network" % (len((st.get("devices") or {}).get("list") or [])
+                                                           or net.get("devices", 0)), COLOR_FG))
         for icon, a, b, col in lines:
             if self.icon(icon):
                 self.text(left, y, self.icon(icon), self.f_icon, COLOR_LABEL)
@@ -1869,14 +1946,21 @@ class NetworkScoutApp:
     def body_events(self, st, y, left, right):
         x = left
         f = self.cfg["filters"]
+        devices_view = self.cfg.get("events_view") == "devices"
         for cat, label in (("alert", "Alerts"), ("net", "Network"), ("conn", "Connections"), ("you", "You")):
-            col = COLOR_WARNING if f.get(cat) else COLOR_DIM
+            col = (COLOR_WARNING if f.get(cat) else COLOR_DIM) if not devices_view else mix_color(COLOR_CARD, COLOR_DIM, 0.8)
             x1, w = self.button(x, y, label, "chip_" + cat, lambda c=cat: self.toggle_filter(c), col, anchor="nw")
             x = x1 + w + 6
+        x += 8                                          # a little gap: Devices is a view, not a filter
+        dlabel = (self.icon("sitemap") + "  " if self.nerd else "") + "Devices"      # two spaces: the glyph is wide
+        self.button(x, y, dlabel, "chip_devices", self.toggle_devices_view,
+                    COLOR_PRIMARY if devices_view else COLOR_LABEL, anchor="nw")
         bell_col = COLOR_PRIMARY if self.cfg.get("notify") else COLOR_DIM
-        self.button(right, y, (self.icon("bell") + " " if self.nerd else "") + ("alerts on" if self.cfg.get("notify") else "alerts off"),
+        self.button(right, y, (self.icon("bell") + "  " if self.nerd else "") + ("alerts on" if self.cfg.get("notify") else "alerts off"),
                     "chip_bell", self.toggle_notify, bell_col)
         y += self.lh + 12
+        if devices_view:
+            return self.body_devices(st, y, left, right)
         evs = self.filtered_events()
         top = y
         if not evs:
@@ -1899,7 +1983,133 @@ class NetworkScoutApp:
         self.events_area = (top - 30, y, left, right)
         return y
 
+    def body_devices(self, st, y, left, right):
+        dv = st.get("devices") or {}
+        devs = dv.get("list") or []
+        busy = st.get("devices_busy")
+        info = "%d device%s on %s" % (len(devs), "" if len(devs) == 1 else "s", dv.get("iface") or "your network")
+        if dv.get("scanned"):
+            info += "  \u2022  scanned " + time.strftime("%H:%M", time.localtime(dv["scanned"]))
+        self.text(left, y + 3, info, self.f_small, COLOR_DIM)
+        label = ("Scanning" + "." * (1 + int(time.time() * 2) % 3)) if busy else "Scan"
+        self.button(right, y, label, "btn_scan", self.scan_devices, COLOR_WARNING if busy else COLOR_PRIMARY)
+        y += self.lh + 12
+        top = y
+        if not devs:
+            self.text(left, y, "Looking for devices\u2026" if busy else "No devices seen yet. Press Scan.",
+                      self.f_small, COLOR_DIM)
+            y += self.lh + 4
+        f = self.f_small
+        w_mac, w_ip = f.measure("00:00:00:00:00:00"), f.measure("255.255.255.255")
+        x_mac = right - w_mac
+        x_ip = x_mac - 14 - w_ip
+        rows = max(3, self.event_rows - 2)
+        self.dev_scroll = min(getattr(self, "dev_scroll", 0), max(0, len(devs) - rows))
+        for i, d in enumerate(devs[self.dev_scroll:self.dev_scroll + rows]):
+            tag = "dev_%d" % (self.dev_scroll + i)
+            if d.get("self"):
+                col = COLOR_PRIMARY
+            elif d.get("router"):
+                col = COLOR_ACCENT
+            elif d.get("state") in ("REACHABLE", "DELAY", "PROBE"):
+                col = COLOR_SUCCESS
+            else:
+                col = COLOR_LABEL
+            ix = left
+            ic = self.icon(KIND_ICON.get(d.get("kind"), "question"))
+            if ic:
+                self.text(ix, y - 1, ic, f, col, tags=(tag, "click"))
+                ix += 20
+            name = d.get("name") or "?"
+            maker = d.get("vendor") or ""
+            shown = self.fit(name, f, x_ip - ix - 12)
+            self.text(ix, y, shown, f, COLOR_FG if d.get("named") or d.get("source") in ("mdns", "netbios", "dns", "you")
+                      else COLOR_LABEL, tags=(tag, "click"))
+            nx = ix + f.measure(shown) + 8
+            if maker and maker != name and nx < x_ip - 40:
+                self.text(nx, y, self.fit(maker, f, x_ip - nx - 12), f, COLOR_DIM, tags=(tag, "click"))
+            self.text(x_ip, y, d.get("ip", ""), f, COLOR_LABEL, tags=(tag, "click"))
+            self.text(x_mac, y, d.get("mac") or "", f, COLOR_DIM, tags=(tag, "click"))
+            if not d.get("self"):
+                self.click(tag, lambda e, dd=dict(d): self.name_device_dialog(dd))
+            y += self.lh + 3
+        if len(devs) > rows:
+            self.text(right, y, "scroll for more (%d-%d of %d)" % (self.dev_scroll + 1, min(len(devs), self.dev_scroll + rows),
+                                                                   len(devs)), f, COLOR_DIM, "ne")
+            y += self.lh + 2
+        if devs:
+            self.text(left, y + 2, "Click a device to give it a name (kept only on this computer).", f, COLOR_DIM)
+            y += self.lh + 4
+        self.events_area = (top - 30, y, left, right)
+        return y
+
+    def toggle_devices_view(self):
+        going = self.cfg.get("events_view") != "devices"
+        self.cfg["events_view"] = "devices" if going else "events"
+        self.dev_scroll = 0
+        if going:
+            dv = self.monitor.get().get("devices") or {}
+            if time.time() - (dv.get("scanned") or 0) > 300:       # fresh list when the tab is opened
+                self.monitor.request_scan()
+        self.save_config()
+        self.dirty = True
+
+    def scan_devices(self):
+        if not self.monitor.get().get("devices_busy"):
+            self.monitor.request_scan()
+            self.monitor.set(devices_busy=True)
+            self.dirty = True
+
+    def name_device_dialog(self, d):
+        dlg = self.dialog("Name this device")
+        tk.Label(dlg, text="%s  \u2022  %s%s" % (d.get("ip"), d.get("mac"), "  \u2022  " + d["vendor"] if d.get("vendor") else ""),
+                 bg=COLOR_BG, fg=COLOR_LABEL, font=self.f_small).pack(anchor="w", padx=16, pady=(0, 8))
+        var = tk.StringVar(value=d.get("name", "") if d.get("named") or d.get("source") != "guess" else "")
+        entry = tk.Entry(dlg, textvariable=var, width=32, bg=COLOR_TRACK, fg=COLOR_FG, insertbackground=COLOR_FG,
+                         relief="flat", font=self.f_body)
+        entry.pack(anchor="w", padx=16, pady=(0, 8))
+        entry.focus_set()
+        result = {}
+
+        def save(name):
+            result["name"] = name
+            dlg.destroy()
+        entry.bind("<Return>", lambda e: save(var.get().strip()))
+        items = [("Save", lambda: save(var.get().strip()))]
+        if d.get("named"):
+            items.append(("Forget name", lambda: save("")))
+        items.append(("Cancel", dlg.destroy))
+        self.buttons(dlg, items)
+        dlg.update_idletasks()
+        dlg.geometry("+%d+%d" % (self.root.winfo_rootx() + 30, self.root.winfo_rooty() + 60))
+        try:
+            dlg.grab_set()
+        except tk.TclError:
+            pass
+        dlg.wait_window()
+        if "name" not in result:
+            return
+        name = result["name"]
+        if self.demo:
+            self.monitor.name_device(d["mac"], name)
+        else:
+            try:
+                ns.save_device_label(d["mac"], name)
+            except OSError as e:
+                self.monitor.emit("warn", "you", "warn", "Could not save the name: %s" % e)
+                return
+            self.monitor.dev_names.pop(d["mac"], None)
+            self.monitor.refresh_now()
+        self.monitor.emit("you", "you", "check", ('Named %s "%s"' % (d.get("ip"), name)) if name
+                       else "Forgot the name of %s" % d.get("ip"))
+        self.dirty = True
+
     def toggle_filter(self, cat):
+        if self.cfg.get("events_view") == "devices":       # a filter chip takes you back to the events
+            self.cfg["events_view"] = "events"
+            self.save_config()
+            self.dirty = True
+            return
         self.cfg["filters"][cat] = not self.cfg["filters"].get(cat, True)
         self.scroll = 0
         self.save_config()

@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.6%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Linux-any%20distribution%20(normal%2C%20immutable%2C%20atomic)-191926?style=flat-square&logo=linux&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/Dependencies-none%20(standard%20library)-86efac?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-119%20passing%20on%208%20systems-86efac?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-131%20passing%20on%208%20systems-86efac?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-86efac?style=flat-square)
 
 ![The networkScout app: protection switches, apps and ports, network, health check and live events](assets/screenshots/app-main.png)
@@ -33,8 +33,8 @@
 
 networkScout is two programs in one project:
 
-- **`networkscout`**, a terminal command. It checks your computer and network in about 20 seconds, explains every result in plain language, and tells you what to do. It can also fix what it finds, control which ports and apps the network can reach, switch the firewall and its profiles, and turn encrypted DNS on or off.
-- **`networkscout-app`**, a desktop app in the style of pySysMon. It shows your protection status with switches for the firewall, ports, apps and DNS, plus a **live event feed** of what happens on your network: new open ports, incoming connections, blocked attempts, wrong passwords, router impersonation, new root certificates and more. Serious events become desktop notifications.
+- **`networkscout`**, a terminal command. It checks your computer and network in about 20 seconds, explains every result in plain language, and tells you what to do. It can also fix what it finds, control which ports and apps the network can reach, switch the firewall and its profiles, turn encrypted DNS on or off, and list the devices on your network.
+- **`networkscout-app`**, a desktop app in the style of pySysMon. It shows your protection status with switches for the firewall, ports, apps and DNS, plus a **live event feed** of what happens on your network: new open ports, incoming connections, blocked attempts, wrong passwords, router impersonation, new root certificates and more. Serious events become desktop notifications. A **Devices** tab lists every device on your network with its name, maker, IP and MAC address.
 
 It answers four questions:
 
@@ -268,6 +268,7 @@ Start it from the applications menu or with `networkscout-app`.
 | **Network** | Cable or Wi-Fi (with security type), local IP, router and its hardware address, VPN, public IPv4 and its owner, IPv6, DNS in use, connections in and out, number of devices seen |
 | **Health check** | The latest full check: counts and the top issues (click one for details and the fix). It runs automatically at most every 6 hours, and again after you change settings. **Fix…** opens `networkscout fix` in a terminal; **Report** opens the Markdown report |
 | **Live events** | Newest first, scrollable, with filters **Alerts / Network / Connections / You** and a bell for desktop notifications. Recent history is shown again after a restart |
+| **Devices** (tab in Live events) | Every device on your network: name, maker, IP and MAC address. **Scan** wakes quiet devices too. Click a device to give it a name; named devices come back as "Back on your network: Living room TV" instead of a new-device alert |
 
 Options:
 
@@ -291,6 +292,8 @@ In `--demo` mode nothing on your computer is read or changed, and nothing is wri
 | **Firewall off:** the badge turns *AT RISK*, the incoming switches stop applying and the alert appears in the live feed (and as a desktop notification). | **Profiles:** click the profile name to switch between strict, public, work, home and other profiles. Hold Shift to use it only on the current network. |
 | ![The Open a port dialog: port 8080, TCP, for 1 hour, only from my network](assets/screenshots/app-open-port.png) ![Turn the firewall off? Off for 15 minutes, Turn off, Cancel](assets/screenshots/app-firewall-ask.png) | ![A health-check finding with what to do](assets/screenshots/app-finding.png) |
 | **Open a port** for a while, and only for your own network if you like. Risky switches ask first, and offer a temporary choice. | **Health check:** click any issue for the explanation and what to do. |
+| ![The Devices tab in Live events: router, this computer, TV, phone, printer and an unknown device, each with name, maker, IP and MAC address](assets/screenshots/app-devices.png) | ![Name this device: a printer at 10.0.0.55 with its MAC address and maker, the name field, Save and Cancel](assets/screenshots/app-device-name.png) |
+| **Devices:** every device on your network with its name, maker, IP and MAC address. *Scan* finds quiet devices too; a private (random) address means a phone or laptop hiding its maker. | **Name a device** by clicking it. Names stay on this computer; a named device that reconnects shows up as "Back on your network" instead of a new-device alert. |
 
 ---
 
@@ -304,6 +307,7 @@ networkscout fix [options]            fix what the check finds, step by step
 networkscout ports [action ...]       open ports: list, allow, block, close unused
 networkscout firewall [action ...]    firewall on/off, profiles, logging of blocked attempts
 networkscout dns [action ...]         encrypted DNS on/off, LLMNR on/off
+networkscout devices [--scan]         devices on your network: name, maker, IP, MAC; name them
 networkscout --version | --help       (add --help after any command for its options)
 ```
 
@@ -425,6 +429,26 @@ networkscout dns llmnr off                    # or on
 
 DNS changes need systemd-resolved. They are tested immediately and undone automatically if names stop resolving.
 
+### `networkscout devices`
+
+```bash
+networkscout devices                              # devices this computer has seen recently
+networkscout devices --scan                       # wake every address on your subnet first (about 5 seconds)
+networkscout devices --json                       # for scripts
+networkscout devices name 192.168.1.20 "Phone"    # give a device a name (by IP or MAC)
+networkscout devices forget 192.168.1.20          # remove the name
+```
+
+Where the names come from, in order: names you gave, the device itself (mDNS for phones, TVs, printers, Macs and
+Linux; NetBIOS for Windows and NAS boxes), your router's name list, and the maker from the MAC address (your
+system's IEEE list; nothing is looked up online). A *private address* is a random MAC that phones and laptops use for
+privacy, so it has no maker.
+
+`--scan` sends one empty packet to each address on your own subnet (no administrator rights, nothing outside your
+network); the replies to the kernel's "who has this address?" questions show which addresses are in use. Without
+`--scan` nothing is sent except the name questions to the devices already listed. Names you give are kept only in
+`~/.config/networkscout/devices.json` on this computer.
+
 ---
 
 ## How it keeps you safe
@@ -464,6 +488,7 @@ DNS changes need systemd-resolved. They are tested immediately and undone automa
 | `~/.local/state/networkscout/last-check.json`, `.md` | The app's latest health check |
 | `/var/lib/networkscout/backups/<time>-<step>/undo.sh` | Undo scripts and backups (root only) |
 | `~/.config/networkscout/app.json` | App settings (event filters, notifications) |
+| `~/.config/networkscout/devices.json` | Names you gave your devices (private: mode 600) |
 | `~/networkscout-reports/` | Reports saved with `--save` |
 | `/etc/systemd/resolved.conf.d/60-networkscout-dns.conf`, `61-networkscout-llmnr.conf` | DNS settings written by networkScout (delete to undo) |
 | `/etc/sysctl.d/60-networkscout-hardening.conf` | Optional kernel hardening (delete and restart to undo) |

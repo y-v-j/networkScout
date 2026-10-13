@@ -1864,6 +1864,342 @@ def ipv6_router_macs():
     return macs
 
 
+
+# ---------------------------------------------------------------------------------------------
+# DEVICES ON YOUR NETWORK (the "devices" command and the app's Devices tab)
+# ---------------------------------------------------------------------------------------------
+OUI_FILES = ('/usr/share/hwdata/oui.txt', '/usr/share/ieee-data/oui.txt', '/usr/share/misc/oui.txt',
+             '/usr/share/nmap/nmap-mac-prefixes')
+_VENDOR_CACHE = {}
+SEEN_STATES = ('REACHABLE', 'STALE', 'DELAY', 'PROBE', 'PERMANENT', 'NOARP')
+DEVICE_KINDS = (                     # vendor words -> kind (only used to pick an icon)
+    ('phone', r'oneplus|xiaomi|redmi|oppo|vivo|realme|motorola|huawei|honor|nothing technology|samsung'
+              r'|google|fairphone|zte|tecno|infinix|nokia'),
+    ('tv', r'\btcl\b|hisense|roku|vizio|sony|lg electronics|amazon|chromecast|nvidia|philips|panasonic'),
+    ('printer', r'hewlett|\bhp\b|canon|epson|brother|lexmark|kyocera|xerox|ricoh'),
+    ('router', r'tp-link|netgear|asustek|d-link|ubiquiti|mikrotik|zyxel|sagemcom|arris|technicolor|tenda'
+               r'|mercusys|juniper|cisco|aruba|fiberhome|nokia solutions'),
+    ('computer', r'intel|realtek|dell|lenovo|apple|micro-star|gigabyte|asrock|raspberry|framework|acer'),
+)
+
+
+def mac_is_random(mac):
+    """Locally administered address: phones and laptops use these for privacy (random per network)."""
+    try:
+        return bool(int(mac.split(':')[0], 16) & 0x02)
+    except (ValueError, IndexError):
+        return False
+
+
+def mac_vendor(mac):
+    """Manufacturer from the first three bytes of a MAC, using the system's IEEE list (no internet)."""
+    mac = (mac or '').lower()
+    if not re.match(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', mac):
+        return ''
+    if mac_is_random(mac):
+        return 'private address'
+    prefix = mac[:8].replace(':', '').upper()
+    if prefix in _VENDOR_CACHE:
+        return _VENDOR_CACHE[prefix]
+    vendor = ''
+    for path in OUI_FILES:
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    if line[:8].replace('-', '').upper() == prefix and '(hex)' in line:     # hwdata / ieee-data
+                        vendor = line.split('(hex)', 1)[1].strip()
+                        break
+                    if line[:6].upper() == prefix and line[6:7] in (' ', '\t'):                # nmap
+                        vendor = line[7:].strip()
+                        break
+        except OSError:
+            continue
+        if vendor:
+            break
+    vendor = re.sub(r'[,.]?\s+(co\.?,?\s*)?(ltd|inc|corp(oration)?|gmbh|llc|limited|s\.?a\.?)\.?$', '', vendor,
+                    flags=re.I).strip()
+    _VENDOR_CACHE[prefix] = vendor
+    return vendor
+
+
+def device_kind(vendor, is_router=False, is_self=False):
+    if is_router:
+        return 'router'
+    if is_self:
+        return 'this'
+    for kind, rx in DEVICE_KINDS:
+        if re.search(rx, vendor or '', re.I):
+            return kind
+    return 'unknown'
+
+
+def neighbours(dev=None):
+    """IPv4 neighbours from the kernel with their state ([] if none). REACHABLE/STALE/... mean the device
+    answered recently; FAILED/INCOMPLETE entries are left out."""
+    rows = []
+    try:
+        data = json.loads(stdout_of(['ip', '-j', '-4', 'neigh', 'show'] + (['dev', dev] if dev else []), 5) or '[]')
+        for n in data:
+            mac, states = (n.get('lladdr') or '').lower(), n.get('state') or []
+            if mac and mac != '00:00:00:00:00:00' and any(s in SEEN_STATES for s in states):
+                rows.append({'ip': n.get('dst'), 'mac': mac, 'iface': n.get('dev') or dev, 'state': states[0]})
+        return rows
+    except (ValueError, TypeError):
+        pass
+    return [dict(a, state='REACHABLE') for a in arp_table() if not dev or a['iface'] == dev]
+
+
+def lan_prefix(dev):
+    """(my address, prefix length) on dev, e.g. ('192.168.1.20', 24)."""
+    try:
+        for a in json.loads(stdout_of(['ip', '-j', '-4', 'addr', 'show', 'dev', dev], 5) or '[]'):
+            for info in a.get('addr_info', []):
+                if info.get('family') == 'inet' and info.get('scope') == 'global':
+                    return info['local'], int(info['prefixlen'])
+    except (ValueError, TypeError, KeyError):
+        pass
+    return None, None
+
+
+def sweep(dev, max_hosts=1024, pace=0.002):
+    """Wake every address on your own subnet so devices that have been quiet show up too: one empty UDP
+    packet per address (port 9, "discard"). The kernel asks each address "who has it?" (ARP) first; the
+    answers fill the neighbour table. No administrator rights and nothing outside your own network."""
+    me, plen = lan_prefix(dev)
+    if not me:
+        return 0
+    net = ipaddress.ip_network('%s/%d' % (me, max(plen, 32 - (max(2, max_hosts) - 1).bit_length())), strict=False)
+    sent = 0
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.setblocking(False)
+        try:
+            s.setsockopt(socket.SOL_SOCKET, 25, dev.encode() + b'\0')     # SO_BINDTODEVICE (may need rights)
+        except OSError:
+            pass
+        for host in net.hosts():
+            if str(host) == me:
+                continue
+            try:
+                s.sendto(b'', (str(host), 9))
+                sent += 1
+            except OSError:
+                pass
+            if pace:
+                time.sleep(pace)
+    finally:
+        s.close()
+    return sent
+
+
+def _ptr_name(ip):
+    return '.'.join(reversed(ip.split('.'))) + '.in-addr.arpa'
+
+
+def _clean_host(name):
+    name = (name or '').strip().rstrip('.')
+    name = re.sub(r'\.(local|lan|home|localdomain|home\.arpa|domain|router)$', '', name, flags=re.I)
+    return name
+
+
+def name_by_mdns(ip, timeout=0.6):
+    """Ask the device itself (mDNS, unicast to port 5353): Apple, Android TV, printers, Linux with Avahi."""
+    res = dns_query(_ptr_name(ip), 'PTR', server=ip, port=5353, timeout=timeout)
+    vals = dns_values(res, 'PTR') if 'error' not in res else []
+    return _clean_host(vals[0]) if vals else ''
+
+
+def name_by_netbios(ip, timeout=0.6):
+    """NetBIOS name (Windows, Samba, many NAS boxes): a node-status query to UDP 137."""
+    q = struct.pack('>HHHHHH', random.randint(0, 0xffff), 0, 1, 0, 0, 0) + \
+        b'\x20' + b'CK' + b'A' * 30 + b'\x00' + struct.pack('>HH', 0x21, 1)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(timeout)
+    try:
+        s.sendto(q, (ip, 137))
+        data, _ = s.recvfrom(2048)
+    except OSError:
+        return ''
+    finally:
+        s.close()
+    return parse_nbstat(data)
+
+
+def parse_nbstat(data):
+    """First unique workstation name (suffix 0x00) from a NetBIOS node-status reply."""
+    try:
+        off = 12
+        off += data[off] + 2 if data[off] != 0xC0 else 2                 # the (encoded) name
+        off += 2 + 2 + 4 + 2                                               # type, class, ttl, rdlength
+        count = data[off]
+        off += 1
+        for i in range(count):
+            raw = data[off + 18 * i: off + 18 * i + 18]
+            name, suffix, flags = raw[:15].decode('ascii', 'replace').strip(), raw[15], (raw[16] << 8) | raw[17]
+            if suffix == 0x00 and not flags & 0x8000 and name:
+                return name
+    except (IndexError, ValueError):
+        pass
+    return ''
+
+
+def name_by_dns(ip, server, timeout=0.6):
+    """The router's own name list (many routers answer reverse lookups for their DHCP clients)."""
+    if not server:
+        return ''
+    res = dns_query(_ptr_name(ip), 'PTR', server=server, timeout=timeout)
+    vals = dns_values(res, 'PTR') if 'error' not in res else []
+    return _clean_host(vals[0]) if vals else ''
+
+
+def device_names(ips, gateway=None, timeout=0.6):
+    """{ip: (name, source)} for the given addresses, asking each device in parallel (about a second)."""
+    import concurrent.futures as cf
+
+    def one(ip):
+        for fn, src in ((name_by_mdns, 'mdns'), (name_by_netbios, 'netbios'),
+                        (lambda a, timeout: name_by_dns(a, gateway, timeout), 'dns')):
+            try:
+                n = fn(ip, timeout=timeout)
+            except Exception:
+                n = ''
+            if n:
+                return ip, (n, src)
+        return ip, ('', '')
+    if not ips:
+        return {}
+    with cf.ThreadPoolExecutor(max_workers=min(16, len(ips))) as ex:
+        return dict(ex.map(one, ips))
+
+
+def devices_path():
+    u = target_user()
+    base = None if elevated_for_user() else os.environ.get('XDG_CONFIG_HOME')
+    return os.path.join(base or os.path.join(u.pw_dir, '.config'), PROG, 'devices.json')
+
+
+def load_device_labels():
+    """{mac: {"name": ..., "added": time}}: names you gave your devices (kept only on this computer)."""
+    try:
+        with open(devices_path()) as f:
+            data = json.load(f)
+        return {k.lower(): v for k, v in data.get('labels', {}).items() if isinstance(v, dict)}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def save_device_label(mac, name):
+    """Name a device (empty name forgets it). Stored privately in ~/.config/networkscout/devices.json."""
+    mac = mac.lower()
+    labels = load_device_labels()
+    if name:
+        labels[mac] = {'name': name.strip()[:60], 'added': int(time.time())}
+    else:
+        labels.pop(mac, None)
+    path = devices_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump({'labels': labels}, f, indent=2, sort_keys=True)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return labels
+
+
+def lan_devices(scan=False, names=True, name_cache=None):
+    """Every device your computer can see on its local network, with MAC, maker and best-known name.
+    scan=True first wakes the whole subnet (see sweep()). name_cache {mac: (name, source)} skips lookups."""
+    v4 = default_routes_v4()
+    dev = v4[0]['iface'] if v4 else None
+    gw = v4[0]['gateway'] if v4 else None
+    if not dev:
+        return {'iface': None, 'gateway': None, 'devices': [], 'scanned': scan}
+    if scan:
+        sweep(dev)
+        time.sleep(2.0)                          # ARP answers arrive within a second or two
+    me, _ = lan_prefix(dev)
+    my_mac = (read('/sys/class/net/%s/address' % dev) or '').strip().lower()
+    labels = load_device_labels()
+    rows = {}
+    if me:
+        rows[me] = {'ip': me, 'mac': my_mac, 'state': 'SELF'}
+    for n in neighbours(dev):
+        rows.setdefault(n['ip'], n)
+    cache = dict(name_cache or {})
+    todo = [r['ip'] for r in rows.values() if r['ip'] != me and r['mac'] not in cache and r['mac'] not in labels]
+    found = device_names(todo, gw) if names else {}
+    out = []
+    for ip, r in rows.items():
+        mac = r['mac']
+        is_self, is_router = ip == me, ip == gw
+        vendor = mac_vendor(mac)
+        if mac in labels:
+            name, src = labels[mac]['name'], 'you'
+        elif is_self:
+            name, src = socket.gethostname().split('.')[0] + ' (this computer)', 'self'
+        else:
+            name, src = cache.get(mac) or found.get(ip) or ('', '')
+        if not name:
+            name, src = ('Router' if is_router else (vendor if vendor and vendor != 'private address'
+                                                     else 'Unknown device')), 'guess'
+        out.append({'ip': ip, 'mac': mac, 'vendor': vendor, 'name': name, 'source': src, 'state': r.get('state', ''),
+                    'router': is_router, 'self': is_self, 'random_mac': mac_is_random(mac),
+                    'kind': device_kind(vendor, is_router, is_self), 'named': mac in labels})
+    out.sort(key=lambda d: tuple(int(x) for x in d['ip'].split('.')))
+    return {'iface': dev, 'gateway': gw, 'devices': out, 'scanned': scan,
+            'names': {d['mac']: (d['name'], d['source']) for d in out if d['source'] in ('mdns', 'netbios', 'dns')}}
+
+
+def cmd_devices(argv, out):
+    ap = argparse.ArgumentParser(prog=PROG + ' devices',
+                                 description='Devices on your local network: address, hardware (MAC) address, maker and '
+                                             'name. Names come from the devices themselves (mDNS, NetBIOS), your '
+                                             'router, or names you give them.')
+    ap.add_argument('action', nargs='?', choices=['list', 'name', 'forget'], default='list')
+    ap.add_argument('target', nargs='?', help='IP or MAC address (for name/forget)')
+    ap.add_argument('label', nargs='*', help='the name to give it (for name)')
+    ap.add_argument('--scan', action='store_true', help='first wake every address on your subnet so quiet devices '
+                                                        'show up too (one tiny packet each; your network only)')
+    ap.add_argument('--no-names', action='store_true', help='do not ask the devices for their names')
+    ap.add_argument('--json', action='store_true', help='print JSON')
+    args = ap.parse_args(argv)
+    if args.action in ('name', 'forget'):
+        if not args.target:
+            ap.error('give the IP or MAC address of the device')
+        mac = args.target.lower()
+        if not re.match(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', mac):
+            mac = next((n['mac'] for n in neighbours() if n['ip'] == args.target), None)
+            if not mac:
+                print('No device with address %s is in view; try: %s devices --scan' % (args.target, PROG))
+                return 1
+        label = ' '.join(args.label) if args.action == 'name' else ''
+        if args.action == 'name' and not label:
+            ap.error('give the name, e.g.:  %s devices name %s "Living room TV"' % (PROG, args.target))
+        save_device_label(mac, label)
+        print(('Named %s "%s".' % (mac, label)) if label else 'Forgot the name of %s.' % mac)
+        return 0
+    if args.scan and not args.json:
+        print(out.dim('Scanning your network (about 3 seconds)...'))
+    res = lan_devices(scan=args.scan, names=not args.no_names)
+    if args.json:
+        print(json.dumps(res['devices'], indent=2))
+        return 0
+    devs = res['devices']
+    print(out.bold('%d device%s on %s' % (len(devs), '' if len(devs) == 1 else 's', res['iface'] or 'no network')) +
+          (out.dim('  (router %s)' % res['gateway']) if res['gateway'] else ''))
+    if not devs:
+        return 0
+    wn = min(34, max(len(d['name']) for d in devs))
+    for d in devs:
+        tag = ' router' if d['router'] else (' this computer' if d['self'] else '')
+        maker = d['vendor'] if d['vendor'] and d['vendor'] != d['name'] else ''
+        print('  %-15s  %s  %s  %s%s' % (d['ip'], d['mac'] or '-' * 17, out.bold(d['name'][:wn].ljust(wn)),
+                                         out.dim(maker[:28]), out.dim(tag) if tag and tag.strip() not in d['name'] else ''))
+    if not args.scan:
+        print(out.dim('\nOnly devices this computer has seen recently are listed. Add --scan to find quiet ones.'))
+    print(out.dim('Name a device:  %s devices name <IP or MAC> "Living room TV"' % PROG))
+    return 0
+
 def check_router(R, baseline, newbase):
     v4 = default_routes_v4()
     v6 = default_routes_v6()
@@ -4017,10 +4353,11 @@ def _main(argv=None):
         print('This tool only works on Linux.')
         return 3
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in ('fix', 'ports', 'firewall', 'dns'):
+    if argv and argv[0] in ('fix', 'ports', 'firewall', 'dns', 'devices'):
         out = make_output('--no-color' in argv)
         argv = [a for a in argv if a != '--no-color']
-        return {'fix': cmd_fix, 'ports': cmd_ports, 'firewall': cmd_firewall, 'dns': cmd_dns}[argv[0]](argv[1:], out)
+        return {'fix': cmd_fix, 'ports': cmd_ports, 'firewall': cmd_firewall, 'dns': cmd_dns,
+                'devices': cmd_devices}[argv[0]](argv[1:], out)
     if argv and argv[0] == 'check':
         argv = argv[1:]
     ap = argparse.ArgumentParser(
@@ -4032,7 +4369,8 @@ def _main(argv=None):
                '  %s ports             see open ports; allow/block apps; open ports only for a while\n'
                '  %s firewall          firewall on/off; profiles: public, home, work, drop, ...\n'
                '  %s dns               encrypted DNS on/off, LLMNR on/off\n'
-               '                       (add --help to any of them)\n\n' % (PROG, PROG, PROG, PROG) +
+               '  %s devices           devices on your network: MAC, maker, name (--scan finds quiet ones)\n'
+               '                       (add --help to any of them)\n\n' % (PROG, PROG, PROG, PROG, PROG) +
                'Online checks contact:\n  - ' + '\n  - '.join(ONLINE_ENDPOINTS) +
                '\nUse --offline to skip them.\n\nExit code: 0 = fine, 1 = things to improve, 2 = serious problems.')
     ap.add_argument('--offline', action='store_true', help='skip every check that needs the internet')

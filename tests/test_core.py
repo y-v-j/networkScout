@@ -745,5 +745,116 @@ class SecurityHardening(unittest.TestCase):
             shutil.rmtree(tmp)
 
 
+
+class LanDevices(unittest.TestCase):
+    """The devices command / Devices tab, with simulated neighbours (documentation addresses only)."""
+
+    def setUp(self):
+        ns._VENDOR_CACHE.clear()
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def oui_file(self):
+        path = os.path.join(self.tmp, 'oui.txt')
+        with open(path, 'w') as f:
+            f.write('00-00-5E   (hex)\t\tICANN, IANA Department\n00005E     (base 16)\t\tICANN, IANA Department\n'
+                    'A0-B1-C2   (hex)\t\tExample Phones Co., Ltd.\n')
+        return path
+
+    def test_vendor_from_the_ieee_list(self):
+        with mock.patch.object(ns, 'OUI_FILES', (self.oui_file(),)):
+            self.assertEqual(ns.mac_vendor('00:00:5e:00:53:01'), 'ICANN, IANA Department')
+            self.assertEqual(ns.mac_vendor('a0:b1:c2:00:00:01'), 'Example Phones')       # "Co., Ltd." trimmed
+            self.assertEqual(ns.mac_vendor('00:11:22:33:44:55'), '')
+            self.assertEqual(ns.mac_vendor('not-a-mac'), '')
+
+    def test_random_mac_is_reported_as_private(self):
+        self.assertTrue(ns.mac_is_random('02:00:5e:00:53:42'))
+        self.assertFalse(ns.mac_is_random('00:00:5e:00:53:42'))
+        self.assertEqual(ns.mac_vendor('da:a1:19:00:00:01'), 'private address')
+
+    def test_kind_from_vendor(self):
+        self.assertEqual(ns.device_kind('Xiaomi Communications'), 'phone')
+        self.assertEqual(ns.device_kind('Hewlett Packard'), 'printer')
+        self.assertEqual(ns.device_kind('Whatever', is_router=True), 'router')
+        self.assertEqual(ns.device_kind(''), 'unknown')
+
+    def test_netbios_node_status_reply(self):
+        names = (b'NAS-BOX'.ljust(15) + b'\x00' + b'\x04\x00') + (b'WORKGROUP'.ljust(15) + b'\x00' + b'\x84\x00')
+        reply = (b'\x12\x34\x84\x00\x00\x00\x00\x01\x00\x00\x00\x00' + b'\x20' + b'CK' + b'A' * 30 + b'\x00' +
+                 b'\x00\x21\x00\x01' + b'\x00\x00\x00\x00' + struct_pack_h(len(names) + 1) + bytes([2]) + names)
+        self.assertEqual(ns.parse_nbstat(reply), 'NAS-BOX')
+        self.assertEqual(ns.parse_nbstat(b'\x00\x01'), '')
+
+    def test_neighbours_keep_live_entries_only(self):
+        data = json.dumps([
+            {'dst': '10.0.0.1', 'dev': 'eth0', 'lladdr': '00:00:5e:00:53:01', 'state': ['REACHABLE']},
+            {'dst': '10.0.0.31', 'dev': 'eth0', 'lladdr': '00:00:5e:00:53:31', 'state': ['STALE']},
+            {'dst': '10.0.0.77', 'dev': 'eth0', 'state': ['FAILED']},
+            {'dst': '10.0.0.78', 'dev': 'eth0', 'lladdr': '00:00:5e:00:53:78', 'state': ['INCOMPLETE']},
+        ])
+        with mock.patch.object(ns, 'stdout_of', return_value=data):
+            got = ns.neighbours('eth0')
+        self.assertEqual([n['ip'] for n in got], ['10.0.0.1', '10.0.0.31'])
+        self.assertEqual(got[1]['state'], 'STALE')
+
+    def test_labels_are_private_and_can_be_forgotten(self):
+        with mock.patch.dict(os.environ, {'XDG_CONFIG_HOME': self.tmp}), \
+                mock.patch.object(ns, 'elevated_for_user', return_value=False):
+            ns.save_device_label('00:00:5E:00:53:31', 'Living room TV')
+            self.assertEqual(ns.load_device_labels()['00:00:5e:00:53:31']['name'], 'Living room TV')
+            self.assertEqual(os.stat(ns.devices_path()).st_mode & 0o777, 0o600)
+            ns.save_device_label('00:00:5e:00:53:31', '')
+            self.assertEqual(ns.load_device_labels(), {})
+
+    def test_lan_devices_names_and_order(self):
+        neigh = [{'ip': '10.0.0.31', 'mac': '00:00:5e:00:53:31', 'iface': 'eth0', 'state': 'REACHABLE'},
+                 {'ip': '10.0.0.1', 'mac': '00:00:5e:00:53:01', 'iface': 'eth0', 'state': 'REACHABLE'},
+                 {'ip': '10.0.0.42', 'mac': '02:00:5e:00:53:42', 'iface': 'eth0', 'state': 'STALE'}]
+        with mock.patch.dict(os.environ, {'XDG_CONFIG_HOME': self.tmp}), \
+                mock.patch.object(ns, 'elevated_for_user', return_value=False), \
+                mock.patch.object(ns, 'default_routes_v4', return_value=[{'iface': 'eth0', 'gateway': '10.0.0.1', 'metric': 0}]), \
+                mock.patch.object(ns, 'lan_prefix', return_value=('10.0.0.20', 24)), \
+                mock.patch.object(ns, 'neighbours', return_value=neigh), \
+                mock.patch.object(ns, 'read', side_effect=lambda p, d=None: '00:00:5e:00:53:20\n' if p.endswith('/address') else d), \
+                mock.patch.object(ns, 'device_names', return_value={'10.0.0.42': ('Pixel-8', 'mdns')}) as names, \
+                mock.patch.object(ns, 'OUI_FILES', (self.oui_file(),)):
+            ns.save_device_label('00:00:5e:00:53:31', 'Living room TV')
+            res = ns.lan_devices(scan=False)
+        devs = res['devices']
+        self.assertEqual([d['ip'] for d in devs], ['10.0.0.1', '10.0.0.20', '10.0.0.31', '10.0.0.42'])
+        by = {d['ip']: d for d in devs}
+        self.assertTrue(by['10.0.0.1']['router'])
+        self.assertEqual(by['10.0.0.1']['kind'], 'router')
+        self.assertTrue(by['10.0.0.20']['self'])
+        self.assertEqual((by['10.0.0.31']['name'], by['10.0.0.31']['source']), ('Living room TV', 'you'))
+        self.assertEqual((by['10.0.0.42']['name'], by['10.0.0.42']['source']), ('Pixel-8', 'mdns'))
+        self.assertTrue(by['10.0.0.42']['random_mac'])
+        # labelled devices and this computer are not asked for names
+        self.assertEqual(sorted(names.call_args[0][0]), ['10.0.0.1', '10.0.0.42'])
+        self.assertEqual(res['names'], {'02:00:5e:00:53:42': ('Pixel-8', 'mdns')})
+
+    def test_sweep_stays_inside_the_subnet(self):
+        sent = []
+
+        class FakeSock:
+            def __init__(self, *a): pass
+            def setblocking(self, v): pass
+            def setsockopt(self, *a): raise OSError('no rights')
+            def sendto(self, data, addr): sent.append(addr[0])
+            def close(self): pass
+        with mock.patch.object(ns, 'lan_prefix', return_value=('192.0.2.20', 24)), \
+                mock.patch.object(ns.socket, 'socket', FakeSock):
+            n = ns.sweep('eth0', pace=0)
+        self.assertEqual(n, 253)                                  # 254 hosts minus this computer
+        self.assertNotIn('192.0.2.20', sent)
+        self.assertTrue(all(a.startswith('192.0.2.') for a in sent))
+
+
+def struct_pack_h(n):
+    return bytes([(n >> 8) & 0xff, n & 0xff])
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -29,7 +29,8 @@ class CLI(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp(prefix='nscli-')
-        cls.env = dict(os.environ, XDG_STATE_HOME=os.path.join(cls.tmp, 'state'), NO_COLOR='1')
+        cls.env = dict(os.environ, XDG_STATE_HOME=os.path.join(cls.tmp, 'state'),
+                       XDG_CONFIG_HOME=os.path.join(cls.tmp, 'config'), NO_COLOR='1')
 
     @classmethod
     def tearDownClass(cls):
@@ -197,6 +198,25 @@ class CLI(unittest.TestCase):
         self.assertEqual(rc, 2)
 
     # -- fix ------------------------------------------------------------------------------------
+    def test_devices_list_json_and_names(self):
+        code, out = self.ns('devices', '--help')
+        self.assertEqual(code, 0)
+        self.assertIn('--scan', out)
+        code, out = self.ns('devices', '--json', '--no-names', timeout=60)
+        self.assertEqual(code, 0)
+        devs = json.loads(out)
+        self.assertIsInstance(devs, list)
+        for d in devs:
+            self.assertTrue({'ip', 'mac', 'vendor', 'name', 'kind', 'router', 'self'} <= set(d))
+        # naming needs an address and a name; names live in the (temporary) config folder only
+        code, out = self.ns('devices', 'name')
+        self.assertNotEqual(code, 0)
+        code, out = self.ns('devices', 'name', '00:00:5e:00:53:31', 'Living', 'room', 'TV')
+        self.assertEqual(code, 0)
+        self.assertIn('Living room TV', out)
+        code, out = self.ns('devices', 'forget', '00:00:5e:00:53:31')
+        self.assertEqual(code, 0)
+
     def test_fix_dry_run(self):
         rc, out = self.ns('fix', '--dry-run', '--yes', '--only', 'certs,firewall,dns,updater,sysctl')
         self.assertEqual(rc, 0, out[-800:])

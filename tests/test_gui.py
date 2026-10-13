@@ -115,7 +115,7 @@ class MonitorEvents(unittest.TestCase):
                                                 'LEN=60 PROTO=TCP SPT=4444 DPT=22 SYN'},
             {'_TRANSPORT': 'kernel', 'MESSAGE': 'filter_IN_home_REJECT: IN=eth0 OUT= SRC=45.155.205.99 DST=192.168.1.20 '
                                                 'LEN=60 PROTO=TCP SPT=4445 DPT=22 SYN'},          # repeat: grouped
-            {'_TRANSPORT': 'kernel', 'MESSAGE': list(b'filter_IN_home_REJECT: IN=eth0 SRC=192.168.1.33 DST=192.168.1.20 '
+            {'_TRANSPORT': 'kernel', 'MESSAGE': list(b'filter_IN_home_REJECT: IN=eth0 SRC=192.168.1.31 DST=192.168.1.20 '
                                                      b'PROTO=UDP SPT=1900 DPT=55555')},            # binary journal field
             {'_TRANSPORT': 'kernel', 'MESSAGE': 'i915 0000:00:02.0: some driver message'},          # ignored
             {'_COMM': 'NetworkManager', 'MESSAGE': "<info>  device (wlp0s20f3): state change: config -> activated "
@@ -137,7 +137,7 @@ class MonitorEvents(unittest.TestCase):
         self.assertIn('Failed administrator password', t)
         self.assertIn('Blocked: 45.155.205.99 -> port 22/tcp: from the internet', t)
         self.assertEqual(t.count('45.155.205.99 -> port 22'), 1)                   # second attempt grouped
-        self.assertIn('Blocked: 192.168.1.33 -> port 55555/udp: likely a reply to device discovery', t)
+        self.assertIn('Blocked: 192.168.1.31 -> port 55555/udp: likely a reply to device discovery', t)
         self.assertIn('wlp0s20f3 activated', t)
         self.assertNotIn('veth', t)
         self.assertNotIn('i915', t)
@@ -276,6 +276,36 @@ class MonitorEvents(unittest.TestCase):
         self.assertTrue(risk and 'hardware address changed' in risk[0]['text'] and risk[0]['notify'])
         ev = self.net(m, [dict(gw, mac='cc:cc:cc:cc:cc:cc'), {'ip': '192.168.1.66', 'mac': 'cc:cc:cc:cc:cc:cc', 'iface': 'eth0'}])
         self.assertIn('Possible ARP spoofing', texts(ev))
+
+    def test_devices_task_scans_once_then_on_request(self):
+        fake = {'iface': 'eth0', 'gateway': '10.0.0.1', 'scanned': False,
+                'devices': [{'ip': '10.0.0.1', 'mac': '00:00:5e:00:53:01', 'name': 'Router', 'kind': 'router'}],
+                'names': {'00:00:5e:00:53:42': ('Pixel-8', 'mdns')}}
+        m = g.Monitor(online=False)
+        with mock.patch.object(ns, 'lan_devices', return_value=fake) as ld:
+            m.t_devices(True)                                     # first round: quick list, no scan yet
+            self.assertFalse(ld.call_args.kwargs['scan'])
+            self.assertEqual(m.get()['devices']['list'][0]['name'], 'Router')
+            m.t_devices(False)                                    # then one scan soon after start
+            self.assertTrue(ld.call_args.kwargs['scan'])
+            m.t_devices(False)                                    # later rounds: passive
+            self.assertFalse(ld.call_args.kwargs['scan'])
+            m.request_scan()
+            m.t_devices(False)
+            self.assertTrue(ld.call_args.kwargs['scan'])
+        self.assertEqual(m.dev_names['00:00:5e:00:53:42'], ('Pixel-8', 'mdns'))     # names asked once
+        self.assertIn('Scanned your network: 1 device', texts(drain(m)))
+
+    def test_named_device_comes_back(self):
+        ns.save_device_label('00:00:5e:00:53:31', 'Living room TV')
+        try:
+            gw = {'ip': '192.168.1.1', 'mac': 'aa:aa:aa:aa:aa:aa', 'iface': 'eth0'}
+            m = g.Monitor(online=False)
+            self.net(m, [gw], first=True)
+            t = texts(self.net(m, [gw, {'ip': '192.168.1.31', 'mac': '00:00:5e:00:53:31', 'iface': 'eth0'}]))
+            self.assertIn('Back on your network: Living room TV (192.168.1.31)', t)
+        finally:
+            ns.save_device_label('00:00:5e:00:53:31', '')
 
     def test_certificate_and_dns_events(self):
         m = g.Monitor(online=False)
@@ -458,6 +488,16 @@ class DemoMode(unittest.TestCase):
                 if a and not a.is_private:
                     self.assertTrue(any(word.startswith(p) for p in ('192.0.2.', '198.51.100.', '203.0.113.')), word)
 
+    def test_demo_devices_are_invented(self):
+        for d in g.DEMO_DEVICES:
+            self.assertTrue(d['ip'].startswith('10.0.0.'), d['ip'])
+            self.assertRegex(d['mac'], r'^0[02]:00:5e:00:53:')                     # RFC 7042 documentation MACs
+        m = g.DemoMonitor()
+        m.name_device('00:00:5e:00:53:55', 'Printer upstairs')
+        self.assertIn('Printer upstairs', [d['name'] for d in m.get()['devices']['list']])
+        m.request_scan()
+        self.assertIn('Scanned your network', texts(drain(m)))
+
     @unittest.skipUnless(HAVE_DISPLAY, 'needs a display and tkinter')
     def test_demo_app_reads_and_writes_nothing(self):
         # in its own process, so monitors left over from other tests cannot run programs meanwhile
@@ -487,8 +527,15 @@ with mock.patch.object(g.subprocess, "run", boom), mock.patch.object(g.subproces
     app.render(app.monitor.get())
     root.update()
     shown = " ".join(app.cv.itemcget(i, "text") for i in app.cv.find_all() if app.cv.type(i) == "text")
+    app.toggle_devices_view()
+    app.render(app.monitor.get())
+    root.update()
+    shown_dev = " ".join(app.cv.itemcget(i, "text") for i in app.cv.find_all() if app.cv.type(i) == "text")
+    app.toggle_filter("alert")                           # a filter chip goes back to the events
+    back = app.cfg["events_view"]
     app.monitor.stop()
-print(json.dumps({"calls": calls, "shown": shown, "events": [e["text"] for e in app.events],
+print(json.dumps({"calls": calls, "shown": shown, "shown_dev": shown_dev, "back": back,
+                  "events": [e["text"] for e in app.events],
                   "files": [os.path.join(d, f) for d, _, fs in os.walk(os.environ["XDG_STATE_HOME"]) for f in fs] +
                            [os.path.join(d, f) for d, _, fs in os.walk(os.environ["XDG_CONFIG_HOME"]) for f in fs]}))
 '''
@@ -505,6 +552,9 @@ print(json.dumps({"calls": calls, "shown": shown, "events": [e["text"] for e in 
         self.assertIn('203.0.113.45', r['shown'])
         for want in ('Firewall turned on', 'Demo: would open a terminal with: networkscout fix', 'Health check done'):
             self.assertTrue(any(e.startswith(want) for e in r['events']), want)
+        for want in ('Devices', 'Living room TV', '00:00:5e:00:53:31', '10.0.0.55', 'Click a device to give it a name'):
+            self.assertIn(want, r['shown_dev'])
+        self.assertEqual(r['back'], 'events')
 
 
 def tearDownModule():
