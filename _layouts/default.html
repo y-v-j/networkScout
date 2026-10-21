@@ -1,29 +1,43 @@
+{%- comment -%}
+  Midnight Ink: dark GitHub Pages layout. README.md becomes the page.
+  Everything repo-specific comes from _config.yml (see _config.example.yml).
+{%- endcomment -%}
+{%- assign title = site.title | default: site.github.repository_name -%}
+{%- assign repo_url = site.repo_url | default: site.github.repository_url -%}
+{%- assign logo = site.logo | default: '/assets/favicon.svg' -%}
 <!DOCTYPE html>
 <html lang="{{ site.lang | default: 'en' }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="theme-color" content="#191926">
+  <meta name="theme-color" content="{{ site.colors.bg | default: '#191926' }}">
   {% seo %}
-  <link rel="icon" href="{{ '/assets/favicon.svg' | relative_url }}" type="image/svg+xml">
+  <link rel="icon" href="{{ site.favicon | default: '/assets/favicon.svg' | relative_url }}" type="image/svg+xml">
   <link rel="preload" href="{{ '/assets/fonts/FantasqueSansMono-Regular.woff2' | relative_url }}" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="{{ '/assets/css/site.css' | relative_url }}?v={{ site.github.build_revision }}">
+  {%- if site.colors %}
+  <style>:root { {% for c in site.colors %}--{{ c[0] }}: {{ c[1] }}; {% endfor %}}</style>
+  {%- endif %}
 </head>
-<body>
+<body data-repo="{{ repo_url }}" data-branch="{{ site.github.source.branch | default: 'main' }}" data-base="{{ site.baseurl }}">
   <a class="skip" href="#content">Skip to content</a>
   <header class="topbar">
     <div class="topbar-inner">
-      <a class="brand" href="{{ '/' | relative_url }}" aria-label="networkScout home">
-        <svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4 5v6c0 5.1 3.4 9.7 8 11 4.6-1.3 8-5.9 8-11V5l-8-3z"/><path class="tick" d="m8.5 12 2.4 2.4 4.6-4.8"/></svg>
-        <span class="brand-name">networkScout</span>
+      <a class="brand" href="{{ '/' | relative_url }}" aria-label="{{ title }} home">
+        <img class="brand-icon" src="{{ logo | relative_url }}" alt="" width="26" height="26">
+        <span class="brand-name">{{ title }}</span>
       </a>
-      <span class="brand-sub">Linux security &amp; privacy check-up</span>
+      {%- if site.tagline %}
+      <span class="brand-sub">{{ site.tagline }}</span>
+      {%- endif %}
       <nav class="topnav" aria-label="Main">
-        <a href="#installation">Install</a>
-        <a href="#the-desktop-app">App</a>
-        <a href="#command-line-usage">CLI</a>
-        <a class="chip" href="{{ site.github.repository_url }}">GitHub</a>
+        {%- for item in site.nav %}
+        <a href="{{ item.url }}">{{ item.title }}</a>
+        {%- endfor %}
+        {%- if repo_url %}
+        <a class="chip" href="{{ repo_url }}">GitHub</a>
+        {%- endif %}
       </nav>
     </div>
   </header>
@@ -36,11 +50,15 @@
   </div>
 
   <footer class="footer">
-    <span>networkScout &middot; MIT licence &middot; &copy; 2026 Yogesh</span>
+    <span>{{ title }}{% if site.license_name %} &middot; {{ site.license_name }} licence{% endif %}{% if site.copyright %} &middot; {{ site.copyright }}{% endif %}</span>
+    {%- if site.footer_note %}
     <span class="sep" aria-hidden="true">&bull;</span>
-    <span>screenshots: demo mode, invented data</span>
+    <span>{{ site.footer_note }}</span>
+    {%- endif %}
+    {%- if repo_url %}
     <span class="sep" aria-hidden="true">&bull;</span>
-    <a href="{{ site.github.repository_url }}">source on GitHub</a>
+    <a href="{{ repo_url }}">source on GitHub</a>
+    {%- endif %}
   </footer>
   <script src="{{ '/assets/js/site.js' | relative_url }}?v={{ site.github.build_revision }}" defer></script>
 </body>

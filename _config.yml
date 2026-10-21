@@ -1,6 +1,21 @@
-# GitHub Pages site: README.md is the home page, rendered with _layouts/default.html
-# (dark "Midnight Ink" theme matching the app). Title and description come from the repository.
+# GitHub Pages: README.md rendered with the Midnight Ink theme (_layouts/default.html).
 lang: en
 author: Yogesh
+tagline: "Linux security & privacy check-up"
+nav:
+  - title: "Install"
+    url: "#installation"
+  - title: "App"
+    url: "#the-desktop-app"
+  - title: "CLI"
+    url: "#command-line-usage"
+license_name: "MIT"
+copyright: "© 2026 Yogesh"
+footer_note: "screenshots: demo mode, invented data"
+defaults:
+  - scope:
+      path: ""
+    values:
+      image: /assets/screenshots/app-main.png
 plugins:
   - jekyll-seo-tag

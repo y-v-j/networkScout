@@ -1,4 +1,4 @@
-// networkScout site: turns the rendered README into the app-style page.
+// Midnight Ink GitHub Pages theme: turns the rendered README into an app-style page.
 // Without JavaScript the page still reads fine; this only adds structure.
 (function () {
   "use strict";
@@ -47,7 +47,7 @@
     main.querySelectorAll("section.card").forEach(function (sec) {
       var h = sec.querySelector("h2");
       if (!h || !h.id) return;
-      if (h.id === "contents") { sec.classList.add("toc-section"); return; }
+      if (/^(table of )?contents$/i.test(h.textContent.trim())) { sec.classList.add("toc-section"); return; }
       var a = document.createElement("a");
       a.href = "#" + h.id;
       a.textContent = h.textContent;
@@ -108,7 +108,22 @@
     block.appendChild(b);
   });
 
-  // 7. Click a screenshot to see it full size
+  // 7. Links to Markdown files that are not part of the site open on GitHub instead
+  //    (pages Jekyll built were already rewritten to .html by jekyll-relative-links)
+  var repo = document.body.getAttribute("data-repo");
+  var branch = document.body.getAttribute("data-branch") || "main";
+  var base = document.body.getAttribute("data-base") || "";
+  if (repo) {
+    main.querySelectorAll("a[href]").forEach(function (a) {
+      var href = a.getAttribute("href");
+      if (/^[a-z]+:|^#|^\/\//i.test(href) || !/\.(md|markdown)(#|$)/i.test(href)) return;
+      var url = new URL(href, location.href);
+      var path = url.pathname.replace(new RegExp("^" + base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/"), "");
+      a.href = repo + "/blob/" + branch + "/" + path + url.hash;
+    });
+  }
+
+  // 8. Click a screenshot to see it full size
   main.addEventListener("click", function (ev) {
     var img = ev.target.closest("img.shot, img.shot-hero");
     if (!img) return;

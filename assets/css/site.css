@@ -1,4 +1,5 @@
-/* networkScout site: the app's "Midnight Ink" palette (networkscout_gui.py COLOR_*) */
+/* Midnight Ink GitHub Pages theme. Palette from the pySysMon / networkScout apps.
+   Override any colour per repo in _config.yml under `colors:` (e.g. primary: "#7dd3fc"). */
 
 @font-face {
   font-family: "Fantasque Sans Mono";
@@ -72,8 +73,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--fg); font-weight: 700; font-size: 1.3rem; }
 .brand:hover { text-decoration: none; }
-.brand-icon { width: 26px; height: 26px; fill: var(--warning); flex: none; }
-.brand-icon .tick { fill: none; stroke: var(--bg); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.brand-icon { width: 26px; height: 26px; flex: none; display: block; }
 .brand-sub { color: var(--label); font-size: .85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .topnav { margin-left: auto; display: flex; align-items: center; gap: 18px; font-size: .92rem; }
 .topnav a { color: var(--label); }
@@ -242,7 +242,7 @@ p.shots img { margin: 0; }
   .topbar-inner { padding: 0 16px; gap: 10px; }
   .brand-sub { display: none; }
   .topnav { gap: 12px; font-size: .85rem; }
-  .topnav a:not(.chip):nth-child(3) { display: none; }
+  .topnav a:not(.chip):nth-child(n+3) { display: none; }
   .layout { padding: 18px 16px 4px; }
   .card { padding: 6px 16px 14px; }
   .content td:first-child { min-width: 9em; }
