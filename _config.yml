@@ -1,0 +1,6 @@
+# GitHub Pages site: README.md is the home page, rendered with _layouts/default.html
+# (dark "Midnight Ink" theme matching the app). Title and description come from the repository.
+lang: en
+author: Yogesh
+plugins:
+  - jekyll-seo-tag
