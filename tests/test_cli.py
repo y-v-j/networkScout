@@ -134,6 +134,8 @@ class CLI(unittest.TestCase):
                  (['ports', 'allow', '8080', '--from', '192.168.1.0/24', '--dry-run'], 'source address="192.168.1.0/24"'),
                  (['ports', 'open', '6881-6889/udp', '--for', '30m', '--dry-run'], '6881-6889/udp'),
                  (['ports', 'block', 'kdeconnect', '--dry-run'], 'Blocking incoming connections for KDE Connect'),
+                 (['ports', 'block', 'mdns', '--stop', '--dry-run'], 'Blocking incoming connections for mDNS'),
+                 (['ports', 'close', 'printing', '--stop', '--dry-run'], 'CUPS keeps running'),
                  (['ports', 'close-unused', '--dry-run', '--yes'], 'Firewall zone')]
         for args, expect in cases:
             rc, out = self.ns(*args)

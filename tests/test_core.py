@@ -151,6 +151,30 @@ class PureFunctions(unittest.TestCase):
         self.assertNotIn(('port', '51413/tcp'), items)         # covered by the service
         self.assertTrue(all(k == 'port' for k, _ in ns.app_items(app, 'ufw')))
 
+    def test_parse_unit_show(self):
+        text = ('Id=avahi-daemon.socket\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n\n'
+                'Id=ssh.service\nLoadState=not-found\nActiveState=inactive\nUnitFileState=\n')
+        units = ns.parse_unit_show(text)
+        self.assertEqual(units[0], {'id': 'avahi-daemon.socket', 'load': 'loaded', 'file': 'enabled', 'active': 'active'})
+        self.assertEqual(units[1]['load'], 'not-found')
+        self.assertEqual(ns.parse_unit_show(''), [])
+
+    def test_service_stop_plan(self):
+        def unit(i, f, a):
+            return {'id': i, 'load': 'loaded', 'file': f, 'active': a}
+        cmds, undo = ns.service_stop_plan([unit('a.socket', 'enabled', 'active'), unit('a.service', 'enabled', 'active')])
+        self.assertEqual(cmds, [['systemctl', 'disable', '--now', 'a.socket', 'a.service']])
+        self.assertEqual(undo, [['systemctl', 'enable', 'a.socket', 'a.service'],
+                                ['systemctl', 'start', 'a.socket', 'a.service']])
+        # running but not enabled (static): stopped now, started again by undo, never enabled by undo
+        cmds, undo = ns.service_stop_plan([unit('b.service', 'static', 'active'), unit('c.service', 'disabled', 'inactive')])
+        self.assertEqual(cmds, [['systemctl', 'stop', 'b.service']])
+        self.assertEqual(undo, [['systemctl', 'start', 'b.service']])
+        # enabled but not running: disabled, and undo does not start it
+        cmds, undo = ns.service_stop_plan([unit('d.service', 'enabled', 'failed')])
+        self.assertEqual(undo, [['systemctl', 'enable', 'd.service']])
+        self.assertEqual(ns.service_stop_plan([unit('e.service', 'disabled', 'inactive')]), ([], []))
+
     def test_human_texts(self):
         self.assertEqual(ns.plural(1, 'port'), '1 port')
         self.assertEqual(ns.plural(3, 'entry', 'entries'), '3 entries')
@@ -681,6 +705,152 @@ class ChangesAndUndo(unittest.TestCase):
         self.assertIn('## 2. Is there a DNS leak?', md)
         self.assertIn('**What to do:**', md)
         self.assertIn('## What to do, most important first', md)
+
+
+# ======================================================================================
+class StopApps(unittest.TestCase):
+    """`ports block APP --stop`: services and login entries are turned off, and undo.sh brings them back.
+    pkill and runuser are never really run, so nothing on this computer is stopped."""
+
+    AVAHI = [{'id': 'avahi-daemon.socket', 'load': 'loaded', 'file': 'enabled', 'active': 'active'},
+             {'id': 'avahi-daemon.service', 'load': 'loaded', 'file': 'enabled', 'active': 'active'}]
+    ENTRY = 'org.kde.kdeconnect.daemon.desktop'
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='nstest-')
+        me = pwd.getpwuid(os.geteuid())
+        self.user = mock.Mock(pw_name=me.pw_name, pw_uid=me.pw_uid, pw_dir=os.path.join(self.tmp, 'home'))
+        self.mine = os.path.join(self.user.pw_dir, '.config', 'autostart', self.ENTRY)
+        sysdir = os.path.join(self.tmp, 'xdg-autostart')
+        os.makedirs(sysdir)
+        with open(os.path.join(sysdir, self.ENTRY), 'w') as f:
+            f.write('[Desktop Entry]\nExec=kdeconnectd\n')
+        self.calls = []
+        real_run = ns.Changer.run
+
+        def fake_run(ch, cmd, **kw):
+            self.calls.append(cmd)
+            return True if cmd[0] in ('pkill', 'runuser') else real_run(ch, cmd, **kw)
+        self.patches = [mock.patch.dict(os.environ, {'XDG_STATE_HOME': os.path.join(self.tmp, 'state')}),
+                        mock.patch.object(ns, 'target_user', return_value=self.user),
+                        mock.patch.object(ns, 'SYSTEM_AUTOSTART', sysdir),
+                        mock.patch.object(ns.Changer, 'run', fake_run)]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def stop(self, key, dry=True, states=None):
+        ch = ns.Changer(ns.Output(False, True), dry_run=dry)
+        buf = io.StringIO()
+        with mock.patch.object(ns, 'unit_states', return_value=states), contextlib.redirect_stdout(buf):
+            ok = ns.stop_app(ns.Output(False, True), ch, ns.resolve_target(key, []))
+        return ok, buf.getvalue(), ch
+
+    def undo_lines(self, path):
+        with open(path) as f:
+            return [l for l in f.read().splitlines() if l and not l.startswith(('#', 'set ', 'echo '))]
+
+    def test_system_service_is_disabled_not_killed(self):
+        ok, out, ch = self.stop('mdns', states=self.AVAHI)
+        self.assertTrue(ok)
+        self.assertIn('would run: systemctl disable --now avahi-daemon.socket avahi-daemon.service', out)
+        self.assertNotIn('pkill', out)                      # avahi runs as its own user: pkill -u USER would miss it
+        ch.dry = False
+        self.assertEqual(self.undo_lines(ch.finish()), ['systemctl enable avahi-daemon.socket avahi-daemon.service',
+                                                        'systemctl start avahi-daemon.socket avahi-daemon.service'])
+
+    def test_service_states_without_changes(self):
+        off = [dict(u, file='disabled', active='inactive') for u in self.AVAHI]
+        self.assertIn('already off', self.stop('mdns', states=off)[1])
+        self.assertIn('No service for it is installed', self.stop('mdns', states=[])[1])
+        ok, out, ch = self.stop('ssh', states=None)
+        self.assertTrue(ok)
+        self.assertIn('needs systemd', out)
+        self.assertEqual(ch.undo, [])
+
+    def test_cups_keeps_running(self):
+        ok, out, ch = self.stop('printing', states=[{'id': 'cups.service', 'load': 'loaded', 'file': 'enabled',
+                                                     'active': 'active'}])
+        self.assertIn('CUPS keeps running', out)
+        self.assertNotIn('systemctl', out)
+        self.assertEqual(ch.undo, [])
+
+    def test_login_entry_switched_off_and_undone(self):
+        ok, out, ch = self.stop('kdeconnect', dry=False)
+        self.assertTrue(ok)
+        self.assertIn(['pkill', '-u', self.user.pw_name, 'kdeconnect'], self.calls)
+        with open(self.mine) as f:
+            self.assertRegex(f.read(), r'(?m)^\[Desktop Entry\]\nHidden=true$')
+        path = ch.finish()
+        self.assertEqual(self.undo_lines(path), ['rm -f %s' % self.mine])   # same user: no runuser needed
+        os.system('sh %s >/dev/null' % path)
+        self.assertFalse(os.path.exists(self.mine))
+
+    def test_own_login_entries_are_left_alone(self):
+        os.makedirs(os.path.dirname(self.mine))
+        with open(self.mine, 'w') as f:
+            f.write('[Desktop Entry]\nHidden=true\n')
+        self.assertIn('already does not start at login', self.stop('kdeconnect')[1])
+        with open(self.mine, 'w') as f:
+            f.write('[Desktop Entry]\nExec=kdeconnectd --my-option\n')
+        ok, out, ch = self.stop('kdeconnect', dry=False)
+        self.assertIn('left as it is', out)
+        self.assertEqual(ch.undo, [])
+        # a symlink planted in its place is never written through, even if it says Hidden=true
+        target = os.path.join(self.tmp, 'elsewhere')
+        with open(target, 'w') as f:
+            f.write('[Desktop Entry]\nHidden=true\n')
+        os.remove(self.mine)
+        os.symlink(target, self.mine)
+        ok, out, ch = self.stop('kdeconnect', dry=False)
+        self.assertIn('left as it is', out)
+        with open(target) as f:
+            self.assertEqual(f.read(), '[Desktop Entry]\nHidden=true\n')
+
+    def block_mdns(self, runtime, permanent, stop=False):
+        """`ports block mdns` against a fake firewalld zone "home" with these runtime / permanent services."""
+        def zone_info(zone, perm=False):
+            return {'target': 'default', 'services': permanent if perm else runtime, 'ports': [], 'rich': []}
+        buf = io.StringIO()
+        with mock.patch.object(ns, 'listening_sockets', return_value=[]), \
+                mock.patch.object(ns, 'firewall_state', return_value={'tool': 'firewalld', 'active': True}), \
+                mock.patch.object(ns, 'fwd_zone', return_value=('home', 'eth0')), \
+                mock.patch.object(ns, 'fwd_zone_info', side_effect=zone_info), \
+                mock.patch.object(ns, 'fwd_known_services', return_value=frozenset({'mdns'})), \
+                mock.patch.object(ns, 'fwd_service_ports', return_value=('5353/udp',)), \
+                mock.patch.object(ns, 'unit_states', return_value=self.AVAHI), \
+                mock.patch.object(ns.Changer, 'run', lambda ch, cmd, **kw: self.calls.append(cmd) or True), \
+                contextlib.redirect_stdout(buf):
+            rc = ns.ports_change(ns.Output(False, True), 'block', 'mdns', stop=stop, assume_yes=True)
+        return rc, buf.getvalue()
+
+    def test_ports_block_stop_writes_one_undo_script(self):
+        rc, out = self.block_mdns(['dhcpv6-client', 'mdns'], ['dhcpv6-client', 'mdns'], stop=True)
+        self.assertEqual(rc, 0)
+        self.assertIn(['firewall-cmd', '--permanent', '--zone=home', '--remove-service=mdns'], self.calls)
+        self.assertIn(['systemctl', 'disable', '--now', 'avahi-daemon.socket', 'avahi-daemon.service'], self.calls)
+        self.assertNotIn('already blocks', out)
+        path = out.split('Undo: sudo sh ')[1].strip()
+        self.assertEqual(self.undo_lines(path), ['systemctl enable avahi-daemon.socket avahi-daemon.service',
+                                                 'systemctl start avahi-daemon.socket avahi-daemon.service',
+                                                 'firewall-cmd --permanent --zone=home --add-service=mdns',
+                                                 'firewall-cmd --reload'])
+
+    def test_temporary_rule_is_not_made_permanent_by_undo(self):
+        rc, out = self.block_mdns(['mdns'], [])
+        self.assertIn(['firewall-cmd', '--zone=home', '--remove-service=mdns'], self.calls)
+        self.assertNotIn('Undo:', out)                        # nothing permanent changed, nothing to undo
+
+    def test_already_blocked_says_so(self):
+        rc, out = self.block_mdns(['dhcpv6-client'], ['dhcpv6-client'])
+        self.assertEqual(rc, 0)
+        self.assertIn('The firewall already blocks it (zone "home")', out)
+        self.assertFalse([c for c in self.calls if c[0] == 'firewall-cmd'])
+        self.assertNotIn('Undo:', out)
 
 
 # ======================================================================================

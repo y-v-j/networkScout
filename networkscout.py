@@ -3032,8 +3032,8 @@ class Changer:
             if ans in ('n', 'no'):
                 return False
 
-    def run(self, cmd, stream=False, timeout=600, quiet=False):
-        """Returns True on success."""
+    def run(self, cmd, stream=False, timeout=600, quiet=False, input=None):
+        """Returns True on success. input: text for the command's stdin."""
         shown = ' '.join(shlex_quote(c) for c in cmd)
         if self.dry:
             print(self.out.dim('    would run: ' + shown))
@@ -3049,7 +3049,7 @@ class Changer:
                 rc = subprocess.call([exe] + cmd[1:], timeout=timeout)
                 out = ''
             else:
-                p = subprocess.run([exe] + cmd[1:], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                p = subprocess.run([exe] + cmd[1:], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, input=input,
                                    timeout=timeout, encoding='utf-8', errors='replace')
                 rc, out = p.returncode, p.stdout
         except subprocess.TimeoutExpired:
@@ -3100,6 +3100,22 @@ class Changer:
         print(self.out.dim('    wrote %s' % path))
         return True
 
+    def write_user_file(self, user, path, content):
+        """Write a file in a user's home folder as that user, so a symlink planted there cannot make root
+        overwrite a system file. The undo step also runs as the user."""
+        if self.dry:
+            print(self.out.dim('    would write %s:' % path))
+            print(self.out.dim('\n'.join('      ' + l for l in content.rstrip().splitlines())))
+            return True
+        as_user = [] if os.geteuid() == user.pw_uid else ['runuser', '-u', user.pw_name, '--']
+        if not self.run(as_user + ['sh', '-c', 'mkdir -p "${1%/*}" && cat > "$1"', 'sh', path],
+                        quiet=True, input=content):
+            print('    could not write %s' % path)
+            return False
+        self.add_undo(as_user + ['rm', '-f', path])
+        print(self.out.dim('    wrote %s' % path))
+        return True
+
     def finish(self):
         if self.dry or not self.undo:
             return None
@@ -3144,6 +3160,7 @@ APPS = {
                'flatpak': 'org.deluge_torrent.deluge', 'why': 'BitTorrent: lets other users connect to you.'},
     'kdeconnect': {'label': 'KDE Connect / GSConnect', 'services': ['kdeconnect'],
                    'ports': ['1714-1764/tcp', '1714-1764/udp'], 'proc': r'^(kdeconnect|gsconnect)',
+                   'autostart': ['org.kde.kdeconnect.daemon.desktop'],
                    'why': 'Lets your paired phone find and talk to this computer.'},
     'syncthing': {'label': 'Syncthing', 'services': ['syncthing'], 'ports': ['22000/tcp', '22000/udp', '21027/udp'],
                   'proc': r'^syncthing', 'why': 'Lets your other devices sync with this one directly.'},
@@ -3153,15 +3170,22 @@ APPS = {
     'localsend': {'label': 'LocalSend', 'services': [], 'ports': ['53317/tcp', '53317/udp'], 'proc': r'^localsend',
                   'flatpak': 'org.localsend.localsend_app', 'why': 'Receive files from nearby devices.'},
     'ssh': {'label': 'SSH remote login', 'services': ['ssh'], 'ports': ['22/tcp'], 'proc': r'^sshd',
+            'units': ['sshd.socket', 'sshd.service', 'ssh.socket', 'ssh.service'],
             'why': 'Log in to this computer from another one.'},
     'samba': {'label': 'Windows file sharing (Samba server)', 'services': ['samba'],
               'ports': ['139/tcp', '445/tcp', '137/udp', '138/udp'], 'proc': r'^(smbd|nmbd)',
+              'units': ['smb.service', 'nmb.service', 'smbd.service', 'nmbd.service'],
               'why': 'Share folders from this computer with others.'},
     'mdns': {'label': 'mDNS / Bonjour discovery', 'services': ['mdns'], 'ports': ['5353/udp'], 'proc': r'^avahi',
+             'units': ['avahi-daemon.socket', 'avahi-daemon.service'],
              'why': 'Finds printers and other devices on your network.'},
     'printing': {'label': 'Printer sharing (CUPS server)', 'services': ['ipp'], 'ports': ['631/tcp'], 'proc': r'^cups',
+                 'keep': 'CUPS keeps running: this computer needs it to print, also to a USB printer.',
                  'why': 'Shares your printers with other computers.'},
 }
+# 'units': system services that --stop turns off (names differ between distributions; missing ones are skipped)
+# 'autostart': XDG autostart entries that --stop switches off for the user
+# 'keep': why --stop leaves the program running
 
 # what each standard firewalld service is for, and whether to keep it when nothing uses it
 SERVICE_HINTS = {
@@ -3301,6 +3325,97 @@ def app_items(app, tool):
     return items
 
 
+# ---- --stop: quit an app and keep it from starting again by itself ----------------------
+
+RUNNING_STATES = ('active', 'activating', 'reloading')
+SYSTEM_AUTOSTART = '/etc/xdg/autostart'
+AUTOSTART_OFF = ('# Switched off by networkScout ("networkscout ports block %s --stop").\n'
+                 '# Delete this file to start it at login again.\n'
+                 '[Desktop Entry]\nHidden=true\n')
+
+
+def parse_unit_show(text):
+    """`systemctl show --property=Id,LoadState,UnitFileState,ActiveState a b ...` -> [{id, load, file, active}]."""
+    units = []
+    for block in re.split(r'\n\s*\n', text.strip()):
+        kv = dict(l.split('=', 1) for l in block.splitlines() if '=' in l)
+        if kv.get('Id'):
+            units.append({'id': kv['Id'], 'load': kv.get('LoadState', ''), 'file': kv.get('UnitFileState', ''),
+                          'active': kv.get('ActiveState', '')})
+    return units
+
+
+def unit_states(units):
+    """The installed systemd units among these (an alias and its unit count once), or None without systemd."""
+    if not os.path.isdir('/run/systemd/system') or not which('systemctl'):
+        return None
+    seen, found = set(), []
+    for u in parse_unit_show(stdout_of(['systemctl', 'show', '--property=Id,LoadState,UnitFileState,ActiveState',
+                                        '--'] + list(units), 15)):
+        if u['load'] == 'loaded' and u['id'] not in seen:
+            seen.add(u['id'])
+            found.append(u)
+    return found
+
+
+def service_stop_plan(states):
+    """Commands that turn these units off, also after restarts, and the undo commands (in the order they
+    run) that bring back exactly what was on before."""
+    enabled = [u['id'] for u in states if u['file'] == 'enabled']
+    running = [u['id'] for u in states if u['active'] in RUNNING_STATES]
+    cmds, undo = [], []
+    if enabled:
+        cmds.append(['systemctl', 'disable', '--now'] + enabled)
+        undo.append(['systemctl', 'enable'] + enabled)
+    rest = [u for u in running if u not in enabled]
+    if rest:
+        cmds.append(['systemctl', 'stop'] + rest)
+    if running:
+        undo.append(['systemctl', 'start'] + running)
+    return cmds, undo
+
+
+def stop_app(out, ch, app):
+    """--stop: quit the app now and keep it from starting again by itself. Returns False on errors."""
+    if app.get('keep'):
+        print('  ' + app['keep'])
+        return True
+    ok = True
+    if app.get('units'):
+        states = unit_states(app['units'])
+        if states is None:
+            print('  Its service was not turned off: that needs systemd. Use your init system to stop it.')
+            return True
+        cmds, undo = service_stop_plan(states)
+        if not states:
+            print('  No service for it is installed.')
+        elif not cmds:
+            print('  Its service is already off (%s).' % ', '.join(u['id'] for u in states))
+        else:
+            print('  Turning off %s, also after restarts:' % ', '.join(
+                u['id'] for u in states if u['file'] == 'enabled' or u['active'] in RUNNING_STATES))
+        for cmd in cmds:
+            ok = ch.run(cmd) and ok
+        ch.add_undo(*reversed(undo))
+        return ok
+    if not app.get('proc'):
+        return True
+    u = target_user()
+    if app.get('flatpak') and which('flatpak'):
+        ch.run(['runuser', '-u', u.pw_name, '--', 'flatpak', 'kill', app['flatpak']], quiet=True)
+    ch.run(['pkill', '-u', u.pw_name, app['proc'].lstrip('^').split('|')[0].strip('()')], quiet=True)
+    for name in app.get('autostart', ()):
+        mine = os.path.join(u.pw_dir, '.config', 'autostart', name)
+        if os.path.lexists(mine):
+            hidden = not os.path.islink(mine) and re.search(r'^\s*Hidden\s*=\s*true\s*$', read(mine, ''), re.M)
+            print('  It already does not start at login.' if hidden else
+                  '  Your own login entry was left as it is: %s' % mine)
+        elif os.path.exists(os.path.join(SYSTEM_AUTOSTART, name)):
+            print('  Keeping it from starting at login:')
+            ok = ch.write_user_file(u, mine, AUTOSTART_OFF % app['key']) and ok
+    return ok
+
+
 def ufw_spec(port_spec):
     port, proto = port_spec.split('/')
     return '%s/%s' % (port.replace('-', ':'), proto)
@@ -3424,22 +3539,35 @@ def ports_change(out, action, target, duration=None, source=None, stop=False, as
                 ok = ch.run(cmd) and ok
         else:
             info_rt, info_pm = fwd_zone_info(zone), fwd_zone_info(zone, True)
+            undo_fw, removed = [], False
             for cmd in fwd_ops('remove', zone, items):
                 opt = cmd[-1]
                 val = opt.split('=', 1)[1]
                 present = val in info_rt['services'] + info_rt['ports'] + info_pm['services'] + info_pm['ports']
                 if present:
+                    removed = True
                     ok = ch.run(cmd) and ok
+                    if '--permanent' in cmd and val in info_pm['services'] + info_pm['ports']:
+                        undo_fw.append(opt.replace('--remove-', '--add-', 1))
             # rich rules mentioning these ports/services
             for r in set(info_rt['rich'] + info_pm['rich']):
                 if any(('"%s"' % v) in r or ('port="%s"' % v.split('/')[0]) in r for _, v in items):
+                    removed = True
                     ch.run(['firewall-cmd', '--zone=%s' % zone, '--remove-rich-rule=%s' % r])
                     ch.run(['firewall-cmd', '--permanent', '--zone=%s' % zone, '--remove-rich-rule=%s' % r])
+                    if r in info_pm['rich']:
+                        undo_fw.append('--add-rich-rule=%s' % r)
+            for opt in undo_fw:
+                ch.add_undo(['firewall-cmd', '--permanent', '--zone=%s' % zone, opt])
+            if undo_fw:
+                ch.add_undo(['firewall-cmd', '--reload'], after=True)
             info = fwd_zone_info(zone)
             still = [p for p in app['ports'] if port_specs_cover(info['ports'], p.split('/')[1], int(p.split('/')[0].split('-')[0]))]
             if still:
                 print(out.paint(out.codes[WARN], '  ! A wide port range in zone "%s" still lets %s in. Remove it with: '
                                                  '%s ports close-unused' % (zone, ', '.join(still), PROG)))
+            elif not removed:
+                print('  The firewall already blocks it (zone "%s").' % zone)
     elif tool == 'ufw':
         for _, p in app_items(app, 'ufw'):
             spec = ufw_spec(p)
@@ -3458,15 +3586,15 @@ def ports_change(out, action, target, duration=None, source=None, stop=False, as
     else:
         print('Automatic port control works with firewalld or ufw. Your firewall: %s.' % (tool or 'unknown'))
         return 1
-    if stop and action == 'block' and app.get('proc'):
-        u = target_user()
-        if app.get('flatpak') and which('flatpak'):
-            ch.run(['runuser', '-u', u.pw_name, '--', 'flatpak', 'kill', app['flatpak']], quiet=True)
-        ch.run(['pkill', '-u', u.pw_name, app['proc'].lstrip('^').split('|')[0].strip('()')], quiet=True)
+    if stop and action == 'block':
+        ok = stop_app(out, ch, app) and ok
     if not dry:
         print(out.paint(out.codes[OK] if ok else out.codes[WARN], '  Done.' if ok else '  Done, with errors (see above).'))
         if timeout_txt and action == 'allow':
             print('  It closes again automatically after %s (or at the next restart).' % timeout_txt)
+    path = ch.finish()
+    if path:
+        print('  Undo: sudo sh %s' % path)
     return 0 if ok else 1
 
 
@@ -3575,7 +3703,8 @@ def cmd_ports(argv, out):
             p.add_argument('--from', dest='source', metavar='ADDRESS', help='only from this address/network, '
                                                                             'e.g. 192.168.1.0/24')
         else:
-            p.add_argument('--stop', action='store_true', help='also quit the app')
+            p.add_argument('--stop', action='store_true',
+                           help='also quit the app and keep it from starting again by itself (undo script included)')
         p.add_argument('--yes', '-y', action='store_true', help=argparse.SUPPRESS)
         p.add_argument('--dry-run', action='store_true', help='only show what would be done')
     p = sub.add_parser('close-unused', help='remove wide port ranges and rules nothing uses (asks first)')

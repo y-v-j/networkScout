@@ -385,12 +385,21 @@ networkscout ports allow 6881-6889/udp                # ... or a range
 networkscout ports allow kdeconnect --for 1h          # only for a while (30m, 2h, 90s); closes by itself
 networkscout ports allow 8080 --from 192.168.1.0/24   # only from your own network
 networkscout ports block transmission                 # block incoming connections again
-networkscout ports block transmission --stop          # ... and quit the app
+networkscout ports block mdns --stop                  # ... and turn the app off, also after restarts
 networkscout ports close-unused                       # remove wide ranges and rules nothing uses (asks)
 networkscout ports close-unused --yes --dry-run       # preview the recommended clean-up
 ```
 
 Known app names: `transmission`, `qbittorrent`, `deluge`, `kdeconnect`, `syncthing`, `steam`, `localsend`, `ssh`, `samba`, `mdns`, `printing`. You can also name any program that is listening right now. Aliases: `open` = `allow`, `close`/`deny` = `block`. It works with firewalld and ufw.
+
+`--stop` turns the app off so it does not come back by itself:
+
+- **System services** (`mdns` = avahi-daemon, `ssh` = sshd, `samba` = smb/nmb) are disabled and stopped with `systemctl disable --now`. Only the units your distribution has are touched. Without systemd, networkScout tells you to use your init system instead.
+- **KDE Connect** is quit, and its login entry is switched off with `~/.config/autostart/org.kde.kdeconnect.daemon.desktop` (`Hidden=true`). That file is written as you, not as root. A login entry you made yourself is left as it is. You can still start the app by hand.
+- **Other apps** (Transmission, Steam, ...) are quit.
+- **`printing`** only closes the port: CUPS keeps running, because this computer also needs it to print to a USB printer.
+
+Like every other change, `ports block` prints an undo command. The undo script re-adds the firewall rules it removed and switches back on exactly what was on before.
 
 ### `networkscout firewall`
 
@@ -492,6 +501,7 @@ network); the replies to the kernel's "who has this address?" questions show whi
 | `~/networkscout-reports/` | Reports saved with `--save` |
 | `/etc/systemd/resolved.conf.d/60-networkscout-dns.conf`, `61-networkscout-llmnr.conf` | DNS settings written by networkScout (delete to undo) |
 | `/etc/sysctl.d/60-networkscout-hardening.conf` | Optional kernel hardening (delete and restart to undo) |
+| `~/.config/autostart/org.kde.kdeconnect.daemon.desktop` | Keeps KDE Connect from starting at login, written by `ports block kdeconnect --stop` (delete to undo) |
 | `~/.local/state/networkscout/distro-tests/` | Logs of `tests/distro_containers.sh test` |
 
 ---

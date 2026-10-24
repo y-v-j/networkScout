@@ -41,6 +41,20 @@ Containers ran the app tests under Xvfb (on 2026-10-13 the app tests were not ru
 - The check exits with 1 ("things to improve") or 2 ("serious"; the Debian 12 image has a pending security update, which was correctly reported).
 - `ports allow` and `firewall profile` exit with 1 and explain that no firewall is installed.
 
+## Update 2026-10-24: `ports block --stop`
+
+- **Tests:** core 97 / 97 and command line 14 / 14 (with the full online check) on the Bazzite desktop. Core 96 / 96 as root and as a normal user in a Fedora 44 container that runs systemd, avahi and firewalld (before the "already blocks it" message and its test were added).
+- **Real run in that container:**
+  - `ports block mdns --stop` removed the mDNS rule (now and permanently) and disabled avahi.
+  - avahi stayed off after the container restarted.
+  - A second run changed nothing and wrote no undo script.
+  - `undo.sh` brought back the rule and avahi, enabled and running.
+- **KDE Connect login entry:**
+  - The file is written as the user; owner and mode were checked.
+  - With the file in place, systemd's own `systemd-xdg-autostart-generator` no longer creates the login unit. After `undo.sh` it creates it again.
+  - Two planted symlinks were not written through: one in place of the file, one in place of `~/.config/autostart` pointing at `/etc`.
+- **Not re-run for this change:** the other six distribution containers and Python 3.6.
+
 ## What the tests cover
 
 - **Detectors with simulated attacks:**
@@ -51,7 +65,8 @@ Containers ran the app tests under Xvfb (on 2026-10-13 the app tests were not ru
   - UPnP port forwards; stalled updaters; Gentoo tree age.
 - **Commands:**
   - every command, read-only or with `--dry-run`;
-  - the backups and `undo.sh` of real changes (in a temporary folder).
+  - the backups and `undo.sh` of real changes (in a temporary folder);
+  - `ports block --stop`: services disabled with an exact undo, login entries written as the user, symlinks not followed, CUPS left running.
 - **App:**
   - live events from simulated journal and syslog lines: failed sudo and SSH, blocked attempts grouped per source, polkit;
   - system states: firewall turned off, router impersonation, new certificates;
@@ -82,6 +97,8 @@ Containers ran the app tests under Xvfb (on 2026-10-13 the app tests were not ru
 | Tests assumed systemd's `journalctl`, a non-root user and Fedora's CA bundle path | Tests made independent of those (found by the Debian, root and openSUSE runs) |
 | `tests/distro_containers.sh app` left the app running after Ctrl+C | The app's process is ended when the script ends |
 | The command-line tests could write a device name into the real `~/.config` | The tests use a temporary config folder too |
+| `ports block --stop` could not stop system services: it ran `pkill -u USER`, and avahi runs as its own user. KDE Connect came back at the next login. `ports` changes wrote no undo script | `--stop` disables the app's systemd units and switches off its login entry; `ports block` writes an undo script |
+| `ports block` printed nothing about the firewall when it already blocked the app | It says "The firewall already blocks it" |
 
 ## Security review
 
@@ -91,6 +108,7 @@ Containers ran the app tests under Xvfb (on 2026-10-13 the app tests were not ru
 | S2 | The app's switches ran the copy of the core in the user's home folder as root | `sudo ./install.sh --system-core` installs a root-owned copy; privileged actions use it when its file and folders are owned by root and not writable by others |
 | S3 | A UPnP answer could make networkScout fetch a description from any host | The description must come from the device that answered, on the local network, over plain HTTP |
 | S4 | Notification text was passed to the desktop as markup | Escaped, control characters removed, length capped |
+| S5 | (Found during design, 2026-10-24.) Writing the KDE Connect login entry into the user's home as root could follow a planted symlink and overwrite a system file | The entry is written and removed as the user (`runuser`). An existing file or symlink is left alone |
 
 ## Reproduce
 
